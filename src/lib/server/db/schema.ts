@@ -60,3 +60,25 @@ export const verificationToken = pgTable(
 export const users = user;
 export const sessions = session;
 export const verificationTokens = verificationToken;
+
+// Chat storage (tree-structured messages)
+export const chat = pgTable('chat', {
+  id: text('id').primaryKey(),
+  userId: text('userId')
+    .notNull()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  title: text('title').notNull(),
+  createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
+  updatedAt: timestamp('updatedAt', { mode: 'date' }).notNull().defaultNow()
+});
+
+export const message = pgTable('message', {
+  id: text('id').primaryKey(),
+  chatId: text('chatId')
+    .notNull()
+    .references(() => chat.id, { onDelete: 'cascade' }),
+  parentId: text('parentId'), // nullable: when set, this message is a child of another
+  role: text('role').notNull(),
+  content: text('content').notNull(),
+  createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow()
+});

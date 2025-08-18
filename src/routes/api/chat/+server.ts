@@ -3,6 +3,9 @@ import { streamText } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { env } from '$env/dynamic/private';
 import { GOOGLE_GENERATIVE_AI_API_KEY as STATIC_GEMINI_API_KEY } from '$env/static/private';
+import { db } from '$lib/server/db';
+import { chat as chatTable, message as messageTable } from '$lib/server/db/schema';
+import { eq } from 'drizzle-orm';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
   try {
@@ -34,7 +37,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       }
     } else {
       // Handle JSON
-      const body = await request.json().catch(() => ({ messages: [] }));
+      const body = await request.json().catch(() => ({ messages: [], chatId: undefined, parentId: undefined }));
       messages = body.messages ?? [];
     }
 
