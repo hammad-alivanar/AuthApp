@@ -14,6 +14,7 @@ export const authOptions = {
   adapter: DrizzleAdapter(db, { user, account, session, verificationToken } as any),
   trustHost: true,
   secret: env.AUTH_SECRET,
+  debug: true,
   allowDangerousEmailAccountLinking: true, // Allow linking accounts with same email
   session: { 
     strategy: 'database' as const,
@@ -59,7 +60,12 @@ export const authOptions = {
     }),
     GitHub({
       clientId: env.AUTH_GITHUB_ID,
-      clientSecret: env.AUTH_GITHUB_SECRET
+      clientSecret: env.AUTH_GITHUB_SECRET,
+      authorization: {
+        params: {
+          scope: 'read:user user:email'
+        }
+      }
     }),
     Credentials({
       credentials: {
@@ -101,25 +107,95 @@ export const authOptions = {
       const { account: authAccount, profile } = params;
       if (!authAccount || authAccount.provider === 'credentials') return true;
 
-      const email = (profile as any)?.email as string | undefined;
-      if (!email) return true;
+      const provider = authAccount.provider;
+      const providerAccountId = (authAccount as any)?.providerAccountId as string | undefined;
 
-      // Find existing user with the same email
-      const [existingUser] = await db.select().from(user).where(eq(user.email, email.toLowerCase()));
-      if (!existingUser) return true; // No existing user, allow normal account creation
+      // 1) If (provider, providerAccountId) exists, allow login
+      if (providerAccountId) {
+        const [existingAccount] = await db
+          .select()
+          .from(account)
+          .where(and(eq(account.provider, provider), eq(account.providerAccountId, providerAccountId)));
+        if (existingAccount) return true;
+      }
 
-      // Check if this specific provider is already linked
-      const linkedAccounts = await db.select().from(account).where(eq(account.userId, existingUser.id));
-      const linkedProviders = linkedAccounts.map((a) => a.provider);
+      // 2) Get a verified email from the provider
+      let email: string | undefined = (profile as any)?.email?.toLowerCase?.();
+      let isVerified = false;
 
-      if (!linkedProviders.includes(authAccount.provider)) {
-        // Provider not linked yet, but user exists with same email
-        // Allow the sign-in to proceed - Auth.js will automatically link the account
-        console.log(`Linking ${authAccount.provider} account to existing user: ${existingUser.email}`);
+      if (provider === 'google') {
+        const emailVerifiedGoogle = (profile as any)?.email_verified ?? (profile as any)?.verified_email;
+        isVerified = Boolean(email && emailVerifiedGoogle === true);
+      } else if (provider === 'github') {
+        // Prefer fetching from the /user/emails endpoint to ensure we have a verified email
+        try {
+          const accessToken = (authAccount as any)?.access_token as string | undefined;
+          if (accessToken) {
+            const res = await fetch('https://api.github.com/user/emails', {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                Accept: 'application/vnd.github+json'
+              }
+            });
+            if (res.ok) {
+              const emails: Array<{ email: string; verified: boolean; primary: boolean }> = await res.json();
+              const primaryVerified = emails.find((e) => e.primary && e.verified);
+              const anyVerified = emails.find((e) => e.verified);
+              const chosen = (primaryVerified ?? anyVerified)?.email;
+              if (chosen) {
+                email = chosen.toLowerCase();
+                isVerified = true;
+              }
+            }
+          }
+          // Fallback to profile if API call fails but profile.email exists (GitHub may mark it verified on the user object in some cases)
+          if (!isVerified && email) {
+            const emailVerifiedGithub = (profile as any)?.verified;
+            isVerified = Boolean(emailVerifiedGithub === true);
+          }
+        } catch {
+          // Ignore and handle lack of verified email below
+        }
+      }
+
+      if (!email || !isVerified) {
+        // Proper error when provider doesn't give a verified email
+        return '/login?error=OAuthEmailNotVerified';
+      }
+
+      // 3) If verified email exists in users, link provider -> existing user explicitly
+      const [existingUserByEmail] = await db.select().from(user).where(eq(user.email, email));
+      if (existingUserByEmail) {
+        if (providerAccountId) {
+          const [already] = await db
+            .select()
+            .from(account)
+            .where(and(eq(account.provider, provider), eq(account.providerAccountId, providerAccountId)));
+          if (!already) {
+            try {
+              await db.insert(account).values({
+                userId: existingUserByEmail.id,
+                type: authAccount.type as any,
+                provider,
+                providerAccountId,
+                access_token: (authAccount as any)?.access_token ?? null,
+                refresh_token: (authAccount as any)?.refresh_token ?? null,
+                expires_at: (authAccount as any)?.expires_at ?? null,
+                token_type: (authAccount as any)?.token_type ?? null,
+                scope: (authAccount as any)?.scope ?? null,
+                id_token: (authAccount as any)?.id_token ?? null,
+                session_state: (authAccount as any)?.session_state ?? null
+              } as any);
+            } catch (e) {
+              return '/login?error=OAuthLinkFailed';
+            }
+          }
+        }
+        // Log in the linked user
         return true;
       }
 
-      // Provider already linked, proceed normally
+      // 4) No existing user — allow adapter to create user + provider account
       return true;
     },
 
@@ -151,24 +227,25 @@ export const authOptions = {
       // Update user profile information when signing in with OAuth
       if (authAccount && profile && authUser && authUser.id) {
         try {
+          const safeString = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
           if (authAccount.provider === 'google') {
             await db
               .update(user)
               .set({
-                name: profile.name || authUser.name,
-                email: profile.email || authUser.email,
-                image: profile.picture || authUser.image
+                name: safeString((profile as any)?.name) ?? safeString((authUser as any)?.name),
+                email: safeString((profile as any)?.email) ?? safeString((authUser as any)?.email),
+                image: safeString((profile as any)?.picture) ?? safeString((authUser as any)?.image)
               })
-              .where(eq(user.id, authUser.id));
+              .where(eq(user.id, String((authUser as any)?.id)));
           } else if (authAccount.provider === 'github') {
             await db
               .update(user)
               .set({
-                name: profile.name || authUser.name,
-                email: profile.email || authUser.email,
-                image: profile.avatar_url || authUser.image
+                name: safeString((profile as any)?.name) ?? safeString((authUser as any)?.name),
+                email: safeString((profile as any)?.email) ?? safeString((authUser as any)?.email),
+                image: safeString((profile as any)?.avatar_url) ?? safeString((authUser as any)?.image)
               })
-              .where(eq(user.id, authUser.id));
+              .where(eq(user.id, String((authUser as any)?.id)));
           }
         } catch (error) {
           console.error('Error updating user profile:', error);
