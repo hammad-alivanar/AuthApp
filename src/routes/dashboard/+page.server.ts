@@ -10,16 +10,17 @@ export const load: PageServerLoad = async ({ locals, cookies }) => {
   try {
     const authSession = await locals.auth();
     if (authSession?.user?.id) {
-      const userRole = (authSession.user as any).role;
-      if (userRole !== 'admin') throw redirect(303, '/');
+      // Always fetch fresh role from DB to avoid stale/undefined role in session
+      const [dbUser] = await db.select().from(users).where(eq(users.id, authSession.user.id));
+      if (!dbUser || dbUser.role !== 'admin' || dbUser.disabled) throw redirect(303, '/');
 
       const stats = await getUserStats();
       return { 
         user: { 
-          id: authSession.user.id,
-          email: authSession.user.email, 
-          name: authSession.user.name, 
-          role: userRole
+          id: dbUser.id,
+          email: dbUser.email, 
+          name: dbUser.name, 
+          role: dbUser.role
         }, 
         users: stats.users, 
         stats 
@@ -54,32 +55,26 @@ export const load: PageServerLoad = async ({ locals, cookies }) => {
 
 export const actions: Actions = {
   changeRole: async ({ request, locals, cookies }) => {
-    // Check session (try Auth.js first, then manual)
-    let userRole = 'user';
+    // Resolve current user from session, then fetch role from DB to ensure correctness
     let userId = '';
-
     try {
       const authSession = await locals.auth();
-      if (authSession?.user?.id) {
-        userRole = (authSession.user as any).role;
-        userId = authSession.user.id;
-      }
-    } catch (error) {
-      // Fallback to manual session
+      if (authSession?.user?.id) userId = authSession.user.id;
+    } catch {}
+    if (!userId) {
       const sessionToken = cookies.get('authjs.session-token');
       if (sessionToken) {
         const [sessionData] = await db.select().from(session).where(eq(session.sessionToken, sessionToken));
-        if (sessionData && sessionData.expires > new Date()) {
-          const [userData] = await db.select().from(users).where(eq(users.id, sessionData.userId));
-          if (userData && userData.role === 'admin') {
-            userRole = userData.role;
-            userId = userData.id;
-          }
-        }
+        if (sessionData && sessionData.expires > new Date()) userId = sessionData.userId;
       }
     }
 
-    if (userRole !== 'admin') return fail(403, { message: 'Admin access required' });
+    if (!userId) return fail(401, { message: 'Not authenticated' });
+
+    const [currentUser] = await db.select().from(users).where(eq(users.id, userId));
+    if (!currentUser || currentUser.role !== 'admin' || currentUser.disabled) {
+      return fail(403, { message: 'Admin access required' });
+    }
 
     const formData = await request.formData();
     const targetUserId = String(formData.get('userId'));
@@ -94,12 +89,12 @@ export const actions: Actions = {
     }
 
     const adminUser = {
-      id: userId,
-      email: null,
-      name: null,
-      role: userRole,
-      disabled: false
-    };
+      id: currentUser.id,
+      email: currentUser.email,
+      name: currentUser.name,
+      role: currentUser.role,
+      disabled: currentUser.disabled
+    } as any;
 
     if (!canModifyUser(adminUser, targetUserId, 'role')) {
       return fail(400, { message: 'Cannot modify yourself' });
@@ -115,32 +110,26 @@ export const actions: Actions = {
   },
 
   toggleUserStatus: async ({ request, locals, cookies }) => {
-    // Check session (try Auth.js first, then manual)
-    let userRole = 'user';
+    // Resolve current user from session, then fetch role from DB to ensure correctness
     let userId = '';
-
     try {
       const authSession = await locals.auth();
-      if (authSession?.user?.id) {
-        userRole = (authSession.user as any).role;
-        userId = authSession.user.id;
-      }
-    } catch (error) {
-      // Fallback to manual session
+      if (authSession?.user?.id) userId = authSession.user.id;
+    } catch {}
+    if (!userId) {
       const sessionToken = cookies.get('authjs.session-token');
       if (sessionToken) {
         const [sessionData] = await db.select().from(session).where(eq(session.sessionToken, sessionToken));
-        if (sessionData && sessionData.expires > new Date()) {
-          const [userData] = await db.select().from(users).where(eq(users.id, sessionData.userId));
-          if (userData && userData.role === 'admin') {
-            userRole = userData.role;
-            userId = userData.id;
-          }
-        }
+        if (sessionData && sessionData.expires > new Date()) userId = sessionData.userId;
       }
     }
 
-    if (userRole !== 'admin') return fail(403, { message: 'Admin access required' });
+    if (!userId) return fail(401, { message: 'Not authenticated' });
+
+    const [currentUser] = await db.select().from(users).where(eq(users.id, userId));
+    if (!currentUser || currentUser.role !== 'admin' || currentUser.disabled) {
+      return fail(403, { message: 'Admin access required' });
+    }
 
     const formData = await request.formData();
     const targetUserId = String(formData.get('userId'));
@@ -155,12 +144,12 @@ export const actions: Actions = {
     }
 
     const adminUser = {
-      id: userId,
-      email: null,
-      name: null,
-      role: userRole,
-      disabled: false
-    };
+      id: currentUser.id,
+      email: currentUser.email,
+      name: currentUser.name,
+      role: currentUser.role,
+      disabled: currentUser.disabled
+    } as any;
 
     if (!canModifyUser(adminUser, targetUserId, 'status')) {
       return fail(400, { message: 'Cannot modify yourself' });

@@ -14,6 +14,9 @@
   let showStatusModal = false;
   let newRole = 'user';
   let action = 'disable';
+  let justSubmitted: 'role' | 'status' | null = null;
+
+  // Using default enhance; $page.form watcher updates UI and closes modals
 
   function openRoleModal(user: typeof data.users[0]) {
     selectedUser = user;
@@ -33,11 +36,26 @@
     selectedUser = null;
   }
 
-  // Auto-refresh after form submission
-  $: if ($page.form?.success) {
-    setTimeout(() => {
-      window.location.reload();
-    }, 1000);
+  // Update UI and close modals only immediately after a submit we triggered
+  $: if ($page.form?.success && justSubmitted) {
+    if (selectedUser && justSubmitted === 'role') {
+      const idx = data.users.findIndex((u) => u.id === selectedUser!.id);
+      if (idx !== -1) {
+        data.users[idx].role = newRole;
+        // Force reactivity so the table updates
+        data.users = [...data.users];
+      }
+    }
+    if (selectedUser && justSubmitted === 'status') {
+      const idx = data.users.findIndex((u) => u.id === selectedUser!.id);
+      if (idx !== -1) {
+        data.users[idx].disabled = action === 'disable';
+        // Force reactivity so the table updates
+        data.users = [...data.users];
+      }
+    }
+    closeModals();
+    justSubmitted = null;
   }
 </script>
 
@@ -77,14 +95,14 @@
                 <div class="flex gap-2">
                   <button 
                     onclick={() => openRoleModal(u)}
-                    class="text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 disabled:opacity-50"
+                    class="text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 disabled:opacity-50 cursor-pointer"
                     disabled={u.id === data.user.id}
                   >
                     Change Role
                   </button>
                   <button 
                     onclick={() => openStatusModal(u)}
-                    class="text-xs {u.disabled ? 'bg-green-500' : 'bg-red-500'} text-white px-2 py-1 rounded hover:opacity-80 disabled:opacity-50"
+                    class="text-xs {u.disabled ? 'bg-green-500' : 'bg-red-500'} text-white px-2 py-1 rounded hover:opacity-80 disabled:opacity-50 cursor-pointer"
                     disabled={u.id === data.user.id}
                   >
                     {u.disabled ? 'Enable' : 'Disable'}
@@ -100,12 +118,12 @@
 
   <!-- Role Change Modal -->
   {#if showRoleModal && selectedUser}
-    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+    <div class="fixed inset-0 flex items-center justify-center z-50">
+      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl ring-1 ring-black/5">
         <h3 class="text-lg font-semibold mb-4">Change User Role</h3>
         <p class="text-sm text-gray-600 mb-4">Change role for user: <strong>{selectedUser.email}</strong></p>
         
-        <form method="POST" action="?/changeRole" use:enhance>
+        <form method="POST" action="?/changeRole" use:enhance onsubmit={() => (justSubmitted = 'role')}>
           <input type="hidden" name="userId" value={selectedUser.id} />
           
           <div class="mb-4">
@@ -117,10 +135,10 @@
           </div>
           
           <div class="flex gap-3 justify-end">
-            <button type="button" onclick={closeModals} class="px-4 py-2 text-gray-600 hover:text-gray-800">
+            <button type="button" onclick={closeModals} class="px-4 py-2 text-gray-600 hover:text-gray-800 cursor-pointer">
               Cancel
             </button>
-            <button type="submit" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+            <button type="submit" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 cursor-pointer">
               Update Role
             </button>
           </div>
@@ -131,14 +149,14 @@
 
   <!-- Status Toggle Modal -->
   {#if showStatusModal && selectedUser}
-    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+    <div class="fixed inset-0 flex items-center justify-center z-50">
+      <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl ring-1 ring-black/5">
         <h3 class="text-lg font-semibold mb-4">Toggle User Status</h3>
         <p class="text-sm text-gray-600 mb-4">
           {action === 'disable' ? 'Disable' : 'Enable'} user: <strong>{selectedUser.email}</strong>
         </p>
         
-        <form method="POST" action="?/toggleUserStatus" use:enhance>
+        <form method="POST" action="?/toggleUserStatus" use:enhance onsubmit={() => (justSubmitted = 'status')}>
           <input type="hidden" name="userId" value={selectedUser.id} />
           <input type="hidden" name="action" value={action} />
           
@@ -151,12 +169,12 @@
           </div>
           
           <div class="flex gap-3 justify-end">
-            <button type="button" onclick={closeModals} class="px-4 py-2 text-gray-600 hover:text-gray-800">
+            <button type="button" onclick={closeModals} class="px-4 py-2 text-gray-600 hover:text-gray-800 cursor-pointer">
               Cancel
             </button>
             <button 
               type="submit" 
-              class="px-4 py-2 {action === 'disable' ? 'bg-red-500' : 'bg-green-500'} text-white rounded hover:opacity-80"
+              class="px-4 py-2 {action === 'disable' ? 'bg-red-500' : 'bg-green-500'} text-white rounded hover:opacity-80 cursor-pointer"
             >
               {action === 'disable' ? 'Disable User' : 'Enable User'}
             </button>
