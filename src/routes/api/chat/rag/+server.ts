@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { chat, message, chunks, embeddings, documents } from '$lib/server/db/schema';
-import { eq, desc, sql } from 'drizzle-orm';
+import { eq, desc, sql, inArray } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { randomUUID } from 'crypto';
 
@@ -162,14 +162,12 @@ async function callGoogleGenerativeAIWithRAG(messages: any[], contextChunks: any
       contextText += `---\n`;
     });
     contextText += `\n**⚠️ CRITICAL INSTRUCTIONS:**\n`;
-    contextText += `1. Base your response ONLY on the context above\n`;
-    contextText += `2. If the answer is not in this context, say "I don't have enough information in my knowledge base to answer this question accurately."\n`;
-    contextText += `3. Use specific information from the context and cite it with <sup>[1]</sup>, <sup>[2]</sup>, etc.\n`;
-    contextText += `4. Answer naturally like ChatGPT - synthesize information in your own words\n`;
-    contextText += `5. Do NOT include any raw HTML or data attributes in your response\n`;
-    contextText += `6. CRITICAL: Write conversationally, not like a formal report or list\n`;
-    contextText += `7. CRITICAL: Connect ideas naturally with transitions and explanations\n`;
-    contextText += `8. CRITICAL: Avoid rigid formatting like numbered lists unless specifically requested\n`;
+    contextText += `1) Base your response ONLY on the context above\n`;
+    contextText += `2) Use inline numeric citations like [1], [2] where you use retrieved info\n`;
+    contextText += `3) At the end, include a Citations section mapping each number to the document/chunk ID and a short snippet\n`;
+    contextText += `4) Never invent facts; if unsupported by the context, say so\n`;
+    contextText += `5) Rewrite in your own words; do not copy verbatim\n`;
+    contextText += `6) Be concise but informative, similar to research-paper style citations\n`;
   }
 
   // Convert messages to Google's format
@@ -503,95 +501,9 @@ Make your response beautiful, well-formatted, and appropriate to the context and
       snippet: string;
     }>;
     
-    // Process the AI response to convert plain text citations to proper superscript format
-    let processedResponse = aiResponse;
-    
-    console.log('🔍 Original AI response:', aiResponse.substring(0, 200) + '...');
-    
-    // First, clean up any existing HTML sup tags to prevent nesting
-    processedResponse = processedResponse.replace(/<sup[^>]*>\[(\d+)\]<\/sup>/g, '[$1]');
-    
-         // CRITICAL: Remove any ">" prefixes that might be showing
-     processedResponse = processedResponse.replace(/>\[(\d+(?:,\s*\d+)*)\]/g, '[$1]');
-     processedResponse = processedResponse.replace(/>\[(\d+)\]/g, '[$1]');
-     
-     // Replace plain text citations like [1, 2, 3] with proper superscript format
-     processedResponse = processedResponse.replace(/\[(\d+(?:,\s*\d+)*)\]/g, (match: string, numbers: string) => {
-       console.log('🔍 Found multiple citations:', match, '->', numbers);
-       const citationIds = numbers.split(',').map((n: string) => n.trim());
-       const result = citationIds.map((id: string) => `<sup data-cite='${id}'>[${id}]</sup>`).join('');
-       console.log('🔍 Converted to:', result);
-       return result;
-     });
-     
-     // Also handle single citations like [1] or [2]
-     processedResponse = processedResponse.replace(/\[(\d+)\]/g, (match: string, id: string) => {
-       console.log('🔍 Found single citation:', match, '->', id);
-       const result = `<sup data-cite='${id}'>[${id}]</sup>`;
-       console.log('🔍 Converted to:', result);
-       return result;
-     });
-    
-    // Clean up any raw data attributes that might have been included in the response
-    processedResponse = processedResponse.replace(/data-[^=]*="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-[^=]*='[^']*'/g, '');
-    
-    // Also clean up any raw HTML attributes that might be showing
-    processedResponse = processedResponse.replace(/<sup[^>]*data-[^>]*>/g, '');
-    processedResponse = processedResponse.replace(/<sup[^>]*>/g, '<sup>');
-    processedResponse = processedResponse.replace(/<\/sup>/g, '</sup>');
-    
-    // Final cleanup: remove any remaining raw data attributes or malformed HTML
-    processedResponse = processedResponse.replace(/data-[^=]*="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-[^=]*='[^']*'/g, '');
-    processedResponse = processedResponse.replace(/<sup[^>]*data-[^>]*>/g, '<sup>');
-    
-    // CRITICAL: Remove any raw data attributes that are showing as text
-    processedResponse = processedResponse.replace(/data-citation-id="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-source-doc="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-chunk-id="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-snippet="[^"]*"/g, '');
-    
-    // Also handle single quotes
-    processedResponse = processedResponse.replace(/data-citation-id='[^']*'/g, '');
-    processedResponse = processedResponse.replace(/data-source-doc='[^']*'/g, '');
-    processedResponse = processedResponse.replace(/data-chunk-id='[^']*'/g, '');
-    processedResponse = processedResponse.replace(/data-snippet='[^']*'/g, '');
-    
-    // Remove any remaining raw data attributes with any format
-    processedResponse = processedResponse.replace(/data-[^=]*="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-[^=]*='[^']*'/g, '');
-    
-    // CRITICAL: Remove any raw data attributes that might be showing as plain text
-    processedResponse = processedResponse.replace(/data-citation-id="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-source-doc="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-chunk-id="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-snippet="[^"]*"/g, '');
-    
-    // Also handle single quotes
-    processedResponse = processedResponse.replace(/data-citation-id='[^']*'/g, '');
-    processedResponse = processedResponse.replace(/data-source-doc='[^']*'/g, '');
-    processedResponse = processedResponse.replace(/data-chunk-id='[^']*'/g, '');
-    processedResponse = processedResponse.replace(/data-snippet='[^']*'/g, '');
-    
-    // Remove any remaining raw data attributes with any format
-    processedResponse = processedResponse.replace(/data-[^=]*="[^"]*"/g, '');
-    processedResponse = processedResponse.replace(/data-[^=]*='[^']*'/g, '');
-    
-         // FINAL CLEANUP: Remove any remaining raw data attributes that might be showing as text
-     processedResponse = processedResponse.replace(/data-[^=]*="[^"]*"/g, '');
-     processedResponse = processedResponse.replace(/data-[^=]*='[^']*'/g, '');
-     processedResponse = processedResponse.replace(/data-[^=]*=[^"'\s>]+/g, '');
-     
-     // FINAL CLEANUP: Remove any remaining ">" prefixes
-     processedResponse = processedResponse.replace(/>\[(\d+(?:,\s*\d+)*)\]/g, '[$1]');
-     processedResponse = processedResponse.replace(/>\[(\d+)\]/g, '[$1]');
-    
-    console.log('🔍 Processed response:', processedResponse.substring(0, 200) + '...');
-    console.log('🔍 Citations array:', citations);
-    
+    // Return AI response as-is to preserve formatting, plus citations array for UI
     return {
-      answer: processedResponse,
+      answer: aiResponse,
       citations: citations
     };
   } else {
@@ -626,6 +538,8 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 
     let messages: any[] = [];
     let chatId: string | null = null;
+    let documentIds: string[] = [];
+    let summaryRequest = false;
 
     // Check content type and handle accordingly
     const contentType = request.headers.get('content-type') || '';
@@ -634,12 +548,20 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       // Handle form data (when file is uploaded)
       const formData = await request.formData();
       const messagesData = formData.get('messages');
+      const docIds = formData.get('documentIds');
+      const summaryFlag = formData.get('summaryRequest');
       
       if (!messagesData) {
         return json({ error: 'Missing messages' }, { status: 400 });
       }
 
       messages = JSON.parse(messagesData as string);
+      if (docIds) {
+        try { documentIds = JSON.parse(docIds as string) as string[]; } catch {}
+      }
+      if (summaryFlag) {
+        summaryRequest = (summaryFlag as string) === 'true';
+      }
       
       // Extract chatId from the first message if available
       if (messages.length > 0 && messages[0].chatId) {
@@ -649,6 +571,8 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       // Handle JSON data
       const body = await request.json();
       messages = body.messages || [];
+      documentIds = Array.isArray(body.documentIds) ? body.documentIds : [];
+      summaryRequest = !!body.summaryRequest;
       
       // Extract chatId from the first message if available
       if (messages.length > 0 && messages[0].chatId) {
@@ -683,11 +607,29 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       if (env.GOOGLE_GENERATIVE_AI_API_KEY && env.EMBEDDING_API_URL && latestUserMessage) {
         console.log('Using RAG with Google Generative AI API');
         
-        // Generate embedding for the user's question
-        const queryEmbedding = await getEmbedding(latestUserMessage.content);
-        
-        // Search for similar chunks
-        contextChunks = await searchSimilarChunks(queryEmbedding, 5);
+        if (summaryRequest && Array.isArray(documentIds) && documentIds.length > 0) {
+          // Directly fetch chunks for provided document IDs for summarization
+          console.log('🔎 Summary request detected. Fetching chunks by documentIds:', documentIds.length);
+          // Fetch chunks for these documents directly
+          contextChunks = await db
+            .select({
+              chunkId: chunks.id,
+              content: chunks.content,
+              idx: chunks.idx,
+              documentId: chunks.documentId,
+              documentTitle: documents.title,
+              documentSource: documents.source,
+              similarity: sql<number>`0.99`
+            })
+            .from(chunks)
+            .innerJoin(documents, eq(chunks.documentId, documents.id))
+            .where(inArray(chunks.documentId, documentIds))
+            .limit(20);
+        } else {
+          // Generate embedding for the user's question and search
+          const queryEmbedding = await getEmbedding(latestUserMessage.content);
+          contextChunks = await searchSimilarChunks(queryEmbedding, 5);
+        }
         
                  // Filter chunks by similarity threshold (20% minimum similarity for better retrieval)
          const SIMILARITY_THRESHOLD = 0.2; // 20% - lowered for better retrieval

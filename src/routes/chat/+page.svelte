@@ -31,6 +31,9 @@
   let isUploading = false;
   let uploadProgress = '';
   let attachedFiles: Array<{file: File, documentId?: string, chunksCount?: number}> = [];
+  let citationExpanded: Record<string, boolean> = {};
+  let contextExpanded: Record<string, boolean> = {};
+  let hljsReady = false;
 
   // Minimal action to inject trusted HTML (generated locally)
   export function setHtml(node: HTMLElement, params: { html: string }) {
@@ -45,6 +48,44 @@
     };
   }
 
+  // Load highlight.js (once) and expose apply function
+  function ensureHighlightJs() {
+    if (typeof window === 'undefined') return;
+    const existingScript = document.getElementById('hljs-script');
+    const existingLink = document.getElementById('hljs-style');
+    if (!existingLink) {
+      const link = document.createElement('link');
+      link.id = 'hljs-style';
+      link.rel = 'stylesheet';
+      link.href = 'https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css';
+      document.head.appendChild(link);
+    }
+    if (!existingScript) {
+      const script = document.createElement('script');
+      script.id = 'hljs-script';
+      script.src = 'https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js';
+      script.onload = () => {
+        hljsReady = true;
+        applySyntaxHighlighting();
+      };
+      document.body.appendChild(script);
+    } else {
+      hljsReady = true;
+    }
+  }
+
+  function applySyntaxHighlighting() {
+    if (typeof window === 'undefined') return;
+    const w = window as any;
+    if (!hljsReady || !w || !w.hljs) return;
+    const codeBlocks = document.querySelectorAll('pre code');
+    codeBlocks.forEach((block) => {
+      try {
+        w.hljs.highlightElement(block as HTMLElement);
+      } catch (_) {}
+    });
+  }
+
   function escapeHtml(s: string): string {
     return s
       .replace(/&/g, '&amp;')
@@ -54,6 +95,55 @@
 
   function renderMarkdownLite(src: string, citations?: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }>): string {
     let text = src || '';
+    
+    // Remove the first in-text Citations/References/Sources heading and its immediate list
+    {
+      const lines = text.split('\n');
+      const kept: string[] = [];
+      let i = 0;
+      let removed = false;
+      while (i < lines.length) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        const isCitationHeading = !removed && /^(?:#{1,6}\s*)?(?:\*\*|__)?\s*(Citations|References|Sources)\s*:?(?:\*\*|__)?\s*$/i.test(trimmed);
+        if (isCitationHeading) {
+          removed = true;
+          i++;
+          // Skip following list-like reference lines and blanks
+          while (i < lines.length) {
+            const t = lines[i].trim();
+            const isListy = /^([-*+]\s+|\d+\.\s+|\[(?:\d+(?:\s*,\s*\d+)*)\]|Source\s*\d+(?:\s*,\s*Chunk\s*\d+)?)/i.test(t) || t === '';
+            if (isListy) {
+              i++;
+              continue;
+            }
+            break;
+          }
+          continue;
+        }
+        kept.push(line);
+        i++;
+      }
+      text = kept.join('\n');
+    }
+    
+    // Strip any inline citation superscripts injected in the content
+    text = text.replace(/<sup[^>]*class="[^"]*\bcitation-sup\b[^"]*"[^>]*>[\s\S]*?<\/sup>/gi, '');
+
+    // Remove lines that echo retrieved chunk metadata (e.g., "... .pdf, Chunk #9: ...")
+    {
+      const lines = text.split('\n');
+      const filtered: string[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        const looksLikeDocChunk = /\.(pdf|txt|md|docx)\b[^\n]*\bChunk\s*#?\d+/i.test(trimmed) || /^Source\s*\d+(?:\s*,\s*Chunk\s*\d+)?/i.test(trimmed);
+        if (looksLikeDocChunk) {
+          continue;
+        }
+        filtered.push(lines[i]);
+      }
+      text = filtered.join('\n');
+    }
     
     // Headers (# ## ###)
     text = text.replace(/^### (.*$)/gim, '<h3 class="text-lg font-semibold mt-4 mb-2">$1</h3>');
@@ -84,116 +174,9 @@
     // Links [text](url)
     text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="text-blue-600 hover:text-blue-800 underline" target="_blank" rel="noopener noreferrer">$1</a>');
     
-      // Inline citations with tooltips <sup data-cite='1'>[1]</sup>
-    if (citations && citations.length > 0) {
-      console.log('🔍 Processing citations in frontend:', citations);
-      console.log('🔍 Original text:', text.substring(0, 200) + '...');
-      
-      // First, clean up any malformed or nested sup tags and convert to plain text
-      text = text.replace(/<sup[^>]*>\[(\d+)\]<\/sup>/g, '[$1]');
-      
-      // CRITICAL: Remove any ">" prefixes that might be showing
-      text = text.replace(/>\[(\d+(?:,\s*\d+)*)\]/g, '[$1]');
-      text = text.replace(/>\[(\d+)\]/g, '[$1]');
-      
-      // Ensure consistent line breaks for better formatting
-      text = text.replace(/\n\n+/g, '\n\n'); // Normalize multiple line breaks
-      text = text.replace(/\n\s*\n/g, '\n\n'); // Clean up line breaks with spaces
-      
-      // CRITICAL: Remove any raw data attributes that might still be showing
-      text = text.replace(/data-citation-id="[^"]*"/g, '');
-      text = text.replace(/data-source-doc="[^"]*"/g, '');
-      text = text.replace(/data-chunk-id="[^"]*"/g, '');
-      text = text.replace(/data-snippet="[^"]*"/g, '');
-      text = text.replace(/data-citation-id='[^']*'/g, '');
-      text = text.replace(/data-source-doc='[^']*'/g, '');
-      text = text.replace(/data-chunk-id='[^']*'/g, '');
-      text = text.replace(/data-snippet='[^']*'/g, '');
-      
-      // AGGRESSIVE CLEANUP: Remove any remaining raw data attributes with any format
-      text = text.replace(/data-[^=]*="[^"]*"/g, '');
-      text = text.replace(/data-[^=]*='[^']*'/g, '');
-      text = text.replace(/data-[^=]*=[^"'\s>]+/g, '');
-      
-      // Remove any raw data attributes that might be showing as plain text
-      text = text.replace(/data-citation-id="[^"]*"/g, '');
-      text = text.replace(/data-source-doc="[^"]*"/g, '');
-      text = text.replace(/data-chunk-id="[^"]*"/g, '');
-      text = text.replace(/data-snippet="[^"]*"/g, '');
-      text = text.replace(/data-citation-id='[^']*'/g, '');
-      text = text.replace(/data-source-doc='[^']*'/g, '');
-      text = text.replace(/data-chunk-id='[^']*'/g, '');
-      text = text.replace(/data-snippet='[^']*'/g, '');
-      
-      // COMPREHENSIVE CLEANUP: Handle the specific pattern from your example
-      // Remove patterns like: data-citation-id="5" data-source-doc="Israel_info.txt" etc.
-      text = text.replace(/data-citation-id="[^"]*"\s*/g, '');
-      text = text.replace(/data-source-doc="[^"]*"\s*/g, '');
-      text = text.replace(/data-chunk-id="[^"]*"\s*/g, '');
-      text = text.replace(/data-snippet="[^"]*"\s*/g, '');
-      text = text.replace(/data-citation-id='[^']*'\s*/g, '');
-      text = text.replace(/data-source-doc='[^']*'\s*/g, '');
-      text = text.replace(/data-chunk-id='[^']*'\s*/g, '');
-      text = text.replace(/data-snippet='[^']*'\s*/g, '');
-      
-      // Remove any remaining data attributes with any format
-      text = text.replace(/data-[^=]*="[^"]*"\s*/g, '');
-      text = text.replace(/data-[^=]*='[^']*'\s*/g, '');
-      text = text.replace(/data-[^=]*=[^"'\s>]+\s*/g, '');
-      
-      // Deduplicate citations by document and chunk to avoid multiple tooltips for same source
-      const uniqueCitations = citations.reduce((acc, citation) => {
-        const key = `${citation.source_doc}-${citation.chunk_id}`;
-        if (!acc.has(key)) {
-          acc.set(key, citation);
-        }
-        return acc;
-      }, new Map());
-      
-      // Process plain text citations like [1], [2], [1, 2, 3] and convert to interactive superscripts
-      text = text.replace(/\[(\d+(?:,\s*\d+)*)\]/g, (match, numbers) => {
-        console.log('🔍 Found citation pattern:', match, '->', numbers);
-        const citationIds = numbers.split(',').map((n: string) => n.trim());
-        
-        const result = citationIds.map((id: string) => {
-          const citation = citations.find(c => c.id === parseInt(id));
-          if (citation) {
-            console.log('🔍 Found citation data for ID', id, ':', citation);
-            // Escape HTML in data attributes to prevent XSS
-            const escapedSourceDoc = escapeHtml(citation.source_doc);
-            const escapedChunkId = escapeHtml(citation.chunk_id);
-            const escapedSnippet = escapeHtml(citation.snippet);
-            
-            return `<sup class="citation-sup cursor-pointer text-blue-600 hover:text-blue-800 font-semibold transition-colors duration-200" 
-                     data-citation-id="${citation.id}"
-                     data-source-doc="${escapedSourceDoc}"
-                     data-chunk-id="${escapedChunkId}"
-                     data-snippet="${escapedSnippet}">[${citation.id}]</sup>`;
-          }
-          console.log('🔍 No citation found for ID:', id);
-          return `[${id}]`;
-        }).join('');
-        
-        console.log('🔍 Generated citation HTML:', result);
-        return result;
-      });
-      
-      // FINAL CLEANUP: Remove any remaining raw data attributes that might be showing as text
-      text = text.replace(/data-[^=]*="[^"]*"/g, '');
-      text = text.replace(/data-[^=]*='[^']*'/g, '');
-      text = text.replace(/data-[^=]*=[^"'\s>]+/g, '');
-      
-      // FINAL CLEANUP: Remove any remaining ">" prefixes
-      text = text.replace(/>\[(\d+(?:,\s*\d+)*)\]/g, '[$1]');
-      text = text.replace(/>\[(\d+)\]/g, '[$1]');
-      
-      // FINAL FORMATTING: Ensure consistent spacing and formatting
-      text = text.replace(/\n{3,}/g, '\n\n'); // Max 2 consecutive line breaks
-      text = text.replace(/\s+$/gm, ''); // Remove trailing spaces on lines
-      text = text.replace(/^\s+/gm, ''); // Remove leading spaces on lines (except in code blocks)
-      
-      console.log('🔍 Final processed text:', text.substring(0, 200) + '...');
-    }
+    // Remove inline numeric citations like [1] or [1, 2, 3] that are not links
+    text = text.replace(/\s*\[(\d+(?:\s*,\s*\d+)*)\](?!\()/g, '');
+    
     
     // Unordered lists (- * +)
     text = text.replace(/^[\s]*[-*+][\s]+(.*)/gim, '<li class="ml-4">$1</li>');
@@ -240,11 +223,39 @@
     return processedLines.join('');
   }
 
+  // Compute top 2 documents from citations by frequency; return representative entries
+  function getTopCitations(
+    citations?: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }>
+  ): Array<{ source_doc: string; chunk_id: string; snippet: string }> {
+    if (!citations || citations.length === 0) return [];
+    const docToInfo: Map<string, { count: number; first: { source_doc: string; chunk_id: string; snippet: string } }> = new Map();
+    for (const c of citations) {
+      const key = c.source_doc;
+      const existing = docToInfo.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        docToInfo.set(key, { count: 1, first: { source_doc: c.source_doc, chunk_id: c.chunk_id, snippet: c.snippet } });
+      }
+    }
+    const sorted = Array.from(docToInfo.entries()).sort((a, b) => b[1].count - a[1].count);
+    return sorted.slice(0, 2).map(([, info]) => info.first);
+  }
+
+  function getTopDocCount(
+    citations?: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }>
+  ): number {
+    if (!citations || citations.length === 0) return 0;
+    const unique = new Set(citations.map(c => c.source_doc));
+    return Math.min(2, unique.size);
+  }
+
   // Auto-scroll to bottom
   let messagesContainer: HTMLDivElement;
 
   onMount(() => {
     // Convert DB data to local format
+    ensureHighlightJs();
     if (data.chats && data.chats.length > 0) {
       chats = data.chats.map((chat: any) => ({
         id: chat.id,
@@ -378,8 +389,9 @@
                 }));
                 
                 // Update active chat if it still exists
-                if (activeChat) {
-                  const updatedActiveChat = chats.find(c => c.id === activeChat.id);
+                const activeChatId = activeChat?.id;
+                if (activeChatId) {
+                  const updatedActiveChat = chats.find(c => c.id === activeChatId);
                   if (updatedActiveChat) {
                     activeChat = updatedActiveChat;
                   } else if (chats.length > 0) {
@@ -406,7 +418,9 @@
     if ((!text && attachedFiles.length === 0) || loading || !activeChat) return;
     
     console.log('Sending message with text:', text);
+    if (activeChat) {
     console.log('Active chat messages count:', activeChat.messages.length);
+    }
     console.log('Attached files:', attachedFiles.length);
     
     // Process attached files first if any
@@ -530,7 +544,7 @@ Please answer my question based on the content of the attached documents.`;
     console.log('Created userMsg:', userMsg);
 
     // Update chat title if it's the first message
-    if (activeChat.messages.length === 0) {
+    if (activeChat && activeChat.messages.length === 0) {
       activeChat.title = text.length > 50 ? text.substring(0, 50) + '...' : text;
     }
 
@@ -550,7 +564,7 @@ Please answer my question based on the content of the attached documents.`;
         const userMsgWithInternalPrompt = { ...userMsg, content: internalPrompt };
         allMessages.push(userMsgWithInternalPrompt);
         console.log('Normal conversation - all messages:', allMessages.map(m => ({ role: m.role, content: m.content.substring(0, 50) })));
-        return allMessages.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
+        return allMessages.map(({ role, content }) => ({ role, content, chatId: activeChat!.id }));
       })();
 
       console.log('Branch messages before validation:', branchMessages);
@@ -583,14 +597,20 @@ Please answer my question based on the content of the attached documents.`;
 
       // Add the user message to the chat now that we have the context
       activeChat.messages = [...activeChat.messages, userMsg];
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      chats = chats.map(c => (activeChat && c.id === activeChat.id ? activeChat : c));
 
-             const res = await fetch('/api/chat/rag', {
-         method: 'POST',
-         body: JSON.stringify({ messages: validBranchMessages }),
-         headers: { 'content-type': 'application/json' },
-         signal: abortController.signal
-       });
+      const res = await fetch('/api/chat/rag', {
+        method: 'POST',
+        body: JSON.stringify({
+          messages: validBranchMessages,
+          documentIds: attachedFiles
+            .map(af => af.documentId)
+            .filter((id) => typeof id === 'string' && id.length > 0),
+          summaryRequest: (!text && attachedFiles.length > 0)
+        }),
+        headers: { 'content-type': 'application/json' },
+        signal: abortController.signal
+      });
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -612,7 +632,7 @@ Please answer my question based on the content of the attached documents.`;
       };
       
       activeChat.messages = [...activeChat.messages, assistantMsg];
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      chats = chats.map((c) => (activeChat && c.id === activeChat.id ? activeChat : c));
 
       if (reader) {
         while (true) {
@@ -632,7 +652,7 @@ Please answer my question based on the content of the attached documents.`;
                 activeChat.messages = activeChat.messages.map((msg) =>
                   msg.id === assistantId ? { ...msg, content: assistantText } : msg
                 );
-                chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                chats = chats.map((c) => (activeChat && c.id === activeChat.id ? activeChat : c));
                 scrollToBottom();
               } catch (_) {
                 // ignore malformed lines
@@ -650,7 +670,7 @@ Please answer my question based on the content of the attached documents.`;
                   activeChat.messages = activeChat.messages.map((msg) =>
                     msg.id === assistantId ? { ...msg, content: assistantText, citations: citations } : msg
                   );
-                  chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                  chats = chats.map((c) => (activeChat && c.id === activeChat.id ? activeChat : c));
                   
                   // Setup tooltips after citations are added with multiple attempts
                   setTimeout(() => {
@@ -745,6 +765,8 @@ Please answer my question based on the content of the attached documents.`;
     
     // Setup citation tooltips
     setupCitationTooltips();
+    // Apply syntax highlighting after DOM updates
+    applySyntaxHighlighting();
   });
   
   // Setup citation tooltips
@@ -1053,7 +1075,72 @@ Please answer my question based on the content of the attached documents.`;
                     : 'bg-gray-50 text-gray-900 border border-gray-200'
                 }`}>
                     {#if message.role === 'assistant'}
-                      <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content, message.citations) }}></div>
+                      <div class="prose prose-sm max-w-none">
+                        <h3 class="text-base font-semibold mb-2 flex items-center gap-2"><span aria-hidden="true">💡</span> Answer</h3>
+                        <div use:setHtml={{ html: renderMarkdownLite(message.content, message.citations) }}></div>
+                      </div>
+                      {#if message.citations && message.citations.length > 0}
+                        <div class="mt-3 pt-3 border-t border-gray-200">
+                          <button
+                            class="w-full flex items-center justify-between text-sm text-gray-700 hover:text-gray-900 cursor-pointer"
+                            onclick={() => { citationExpanded[message.id] = !citationExpanded[message.id]; }}
+                            aria-expanded={!!citationExpanded[message.id]}
+                            aria-controls={`citations-${message.id}`}
+                          >
+                            <div class="flex items-center gap-2">
+                              <span aria-hidden="true">🔗</span>
+                              <span class="font-medium">Citations</span>
+                              <span class="text-xs text-gray-500">({getTopDocCount(message.citations)})</span>
+                            </div>
+                            <svg class={`w-4 h-4 transform transition-transform duration-200 ${citationExpanded[message.id] ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                            </svg>
+                          </button>
+                          {#if citationExpanded[message.id]}
+                            <ul id={`citations-${message.id}`} class="mt-2 space-y-2">
+                              {#each getTopCitations(message.citations) as c}
+                                <li class="p-2 bg-white rounded-lg border border-gray-200 flex items-start gap-2">
+                                  <svg class="w-4 h-4 text-blue-600 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                  </svg>
+                                  <div class="flex-1">
+                                    <div class="text-sm font-semibold text-gray-900">{c.source_doc}</div>
+                                    <div class="text-xs text-gray-500">{c.chunk_id}</div>
+                                    <div class="text-sm text-gray-700 mt-1">{c.snippet}</div>
+                                  </div>
+                                </li>
+                              {/each}
+                            </ul>
+                          {/if}
+                        </div>
+                        <div class="mt-3">
+                          <button
+                            class="w-full flex items-center justify-between text-sm text-gray-700 hover:text-gray-900 cursor-pointer"
+                            onclick={() => { contextExpanded[message.id] = !contextExpanded[message.id]; }}
+                            aria-expanded={!!contextExpanded[message.id]}
+                            aria-controls={`context-${message.id}`}
+                          >
+                            <div class="flex items-center gap-2">
+                              <span aria-hidden="true">📚</span>
+                              <span class="font-medium">Context used</span>
+                              <span class="text-xs text-gray-500">(top snippets)</span>
+                            </div>
+                            <svg class={`w-4 h-4 transform transition-transform duration-200 ${contextExpanded[message.id] ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                            </svg>
+                          </button>
+                          {#if contextExpanded[message.id]}
+                            <div id={`context-${message.id}`} class="mt-2 space-y-2">
+                              {#each getTopCitations(message.citations) as c}
+                                <div class="p-2 bg-blue-50 rounded-lg border border-blue-200">
+                                  <div class="text-xs text-blue-700 mb-1">{c.source_doc} • {c.chunk_id}</div>
+                                  <div class="text-sm text-gray-800">{c.snippet}</div>
+                                </div>
+                              {/each}
+                            </div>
+                          {/if}
+                        </div>
+                      {/if}
                     {:else}
                       <div class="prose prose-sm max-w-none" use:setHtml={{ html: renderMarkdownLite(message.content) }}></div>
                     {/if}
