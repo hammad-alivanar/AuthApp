@@ -28,10 +28,10 @@
   let availableBranches: { id: string; preview: string; messageCount: number }[] = []; // Available branches
   let searchQuery = ''; // Search query for filtering chats
   let filteredChats: Chat[] = []; // Filtered chats based on search
-  let searchTimeout: number | null = null; // For debounced search
+  let searchTimeout: ReturnType<typeof setTimeout> | null = null; // For debounced search
   let isSearching = false; // Search loading state
   let highlightedMessageId: string | null = null; // Message to highlight after search navigation
-  let searchNavigationTimeout: number | null = null; // Timeout for clearing highlight
+  let searchNavigationTimeout: ReturnType<typeof setTimeout> | null; // Timeout for clearing highlight
 
   // Minimal action to inject trusted HTML (generated locally)
   export function setHtml(node: HTMLElement, params: { html: string }) {
@@ -319,6 +319,10 @@
       }
     });
     
+    // Check if we should create a new chat (from query parameter)
+    const urlParams = new URLSearchParams(window.location.search);
+    const shouldCreateNew = urlParams.get('new') === 'true';
+    
     // Convert DB data to local format
     if (data.chats && data.chats.length > 0) {
       chats = data.chats.map((chat: any) => ({
@@ -334,17 +338,26 @@
         })) : []
       }));
       
-      // Set the first chat as active
-      activeChat = chats[0];
-      
-      // CRITICAL FIX: Initialize branches for the first chat
-      if (activeChat && activeChat.messages.length > 0) {
-        availableBranches = getAvailableBranches(activeChat.messages);
-        if (availableBranches.length > 0) {
-          // CRITICAL FIX: Select the LAST branch by default (most recent)
-          // This ensures UI shows latest content and branch index matches
-          selectedBranchId = availableBranches[availableBranches.length - 1].id;
-          console.log('Default branch selected:', selectedBranchId);
+      // If new chat is requested, create it immediately
+      if (shouldCreateNew) {
+        createNewChat();
+        // Clear the query parameter from URL
+        const newUrl = new URL(window.location.href);
+        newUrl.searchParams.delete('new');
+        window.history.replaceState({}, '', newUrl.toString());
+      } else {
+        // Set the first chat as active (latest chat due to server-side sorting)
+        activeChat = chats[0];
+        
+        // CRITICAL FIX: Initialize branches for the first chat
+        if (activeChat && activeChat.messages.length > 0) {
+          availableBranches = getAvailableBranches(activeChat.messages);
+          if (availableBranches.length > 0) {
+            // CRITICAL FIX: Select the LAST branch by default (most recent)
+            // This ensures UI shows latest content and branch index matches
+            selectedBranchId = availableBranches[availableBranches.length - 1].id;
+            console.log('Default branch selected:', selectedBranchId);
+          }
         }
       }
     } else {
@@ -418,9 +431,22 @@
   });
 
   async function createNewChat() {
+    // Generate a meaningful title based on current date/time
+    const now = new Date();
+    const timeString = now.toLocaleTimeString('en-US', { 
+      hour: 'numeric', 
+      minute: '2-digit',
+      hour12: true 
+    });
+    const dateString = now.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric' 
+    });
+    const title = `Chat ${dateString} at ${timeString}`;
+    
     const newChat: Chat = {
       id: crypto.randomUUID(),
-      title: 'New Chat',
+      title: title,
       messages: [],
       createdAt: new Date()
     };
@@ -589,7 +615,7 @@
                   if (updatedActiveChat) {
                     activeChat = updatedActiveChat;
                     // CRITICAL FIX: Refresh branches for the updated chat
-                    if (activeChat.messages.length > 0) {
+                    if (activeChat && activeChat.messages.length > 0) {
                       availableBranches = getAvailableBranches(activeChat.messages);
                       if (availableBranches.length > 0) {
                         // CRITICAL FIX: Maintain current branch selection if possible
@@ -606,7 +632,7 @@
                   } else if (chats.length > 0) {
                     activeChat = chats[0];
                     // CRITICAL FIX: Initialize branches for the new active chat
-                    if (activeChat.messages.length > 0) {
+                    if (activeChat && activeChat.messages.length > 0) {
                       availableBranches = getAvailableBranches(activeChat.messages);
                       if (availableBranches.length > 0) {
                         // CRITICAL FIX: Select the LAST branch by default (most recent)
@@ -667,21 +693,17 @@
       }
     }
 
-         // compute parent for tree fork
-     let parentId = activeChat.messages.length > 0 ? activeChat.messages[activeChat.messages.length - 1].id : null;
+         // CRITICAL FIX: compute parent for tree fork based on currently displayed messages
+     // This fixes the branching issue where new messages were incorrectly routed to edited branches
+     // instead of continuing from the user's current viewing position in the conversation tree
+     const displayedMessages = selectedBranchId ? getBranchMessages(activeChat.messages, selectedBranchId) : activeChat.messages;
+     let parentId = displayedMessages.length > 0 ? displayedMessages[displayedMessages.length - 1].id : null;
      
-     // If we're in a specific branch, ensure new messages continue from that branch
-     if (selectedBranchId) {
-       // Find the last message in the current branch
-       const currentBranchMessages = getCurrentBranchMessages();
-       if (currentBranchMessages.length > 0) {
-         const lastMessageInBranch = currentBranchMessages[currentBranchMessages.length - 1];
-         if (lastMessageInBranch && lastMessageInBranch.id !== parentId) {
-           // Update parent to continue from the current branch
-           parentId = lastMessageInBranch.id;
-         }
-       }
-     }
+     console.log('=== sendMessage parent detection ===');
+     console.log('selectedBranchId:', selectedBranchId);
+     console.log('displayedMessages count:', displayedMessages.length);
+     console.log('last displayed message:', displayedMessages.length > 0 ? displayedMessages[displayedMessages.length - 1].content.substring(0, 50) : 'none');
+     console.log('parentId for new message:', parentId);
 
     loading = true;
     scrollToBottom();
@@ -690,17 +712,13 @@
     abortController = new AbortController();
 
     try {
-      // Build branch context for messages - ONLY current branch
+      // Build branch context for messages - use the same displayed messages as determined above
       const branchMessages = (() => {
-        // Get current branch messages (includes full path from root to current branch)
-        const currentBranchMessages = selectedBranchId ? 
-          getBranchMessages(activeChat.messages, selectedBranchId) : 
-          activeChat.messages;
+        // Use the same displayedMessages that we used to determine the parent
+        // This ensures consistency between parent detection and context building
+        const messagesWithNewUser = [...displayedMessages, userMsg];
         
-        // Add the new user message to the current branch context
-        const messagesWithNewUser = [...currentBranchMessages, userMsg];
-        
-        return messagesWithNewUser.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
+        return messagesWithNewUser.map(({ role, content }) => ({ role, content, chatId: activeChat!.id }));
       })();
 
       // Validate messages before sending
@@ -730,7 +748,9 @@
       // Add the user message to the chat now that we have the context
       const userMessageWithParent = { ...userMsg, parentId };
       activeChat.messages = [...activeChat.messages, userMessageWithParent];
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Update chat list order to move this chat to the top
+      updateChatListOrder(activeChat);
       
       
 
@@ -766,7 +786,9 @@
       };
       
       activeChat.messages = [...activeChat.messages, assistantMsg];
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Update chat list order to move this chat to the top
+      updateChatListOrder(activeChat);
 
       if (reader) {
         try {
@@ -790,7 +812,9 @@
                   activeChat.messages = activeChat.messages.map((msg) =>
                     msg.id === assistantId ? { ...msg, content: assistantText } : msg
                   );
-                  chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                  
+                  // Update chat list order to move this chat to the top
+                  updateChatListOrder(activeChat);
                   scrollToBottom();
                 } catch (_) {
                   // ignore malformed lines
@@ -848,7 +872,7 @@
             availableBranches = rootMessages.map(root => ({
               id: root.id,
               preview: root.content.length > 50 ? root.content.substring(0, 50) + '...' : root.content,
-              messageCount: getBranchMessageCount(activeChat.messages, root.id)
+              messageCount: getBranchMessageCount(activeChat!.messages, root.id)
             }));
           } else {
             availableBranches = [];
@@ -856,7 +880,9 @@
           
           // Force a re-render to show navigation buttons
           activeChat = { ...activeChat };
-          chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+          
+          // Update chat list order to move this chat to the top
+          updateChatListOrder(activeChat);
           
           // Clear UI update flag after re-render is complete
           setTimeout(() => {
@@ -1057,7 +1083,9 @@
 
       // Add the edited message to the chat (keeping original message)
       activeChat.messages = [...activeChat.messages, editedMsg];
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Update chat list order to move this chat to the top
+      updateChatListOrder(activeChat);
       
       // Clear branch check cache to ensure fresh results after edit
       branchCheckCache.clear();
@@ -1103,13 +1131,17 @@
       
       // Force a re-render to show the navigation buttons immediately
       activeChat = { ...activeChat };
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Update chat list order to move this chat to the top
+      updateChatListOrder(activeChat);
       
       // Force another re-render to ensure proper filtering
       setTimeout(() => {
         if (activeChat) {
           activeChat = { ...activeChat };
-          chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+          
+          // Update chat list order to move this chat to the top
+          updateChatListOrder(activeChat);
         }
       }, 0);
       
@@ -1117,7 +1149,9 @@
       setTimeout(() => {
         if (activeChat) {
           activeChat = { ...activeChat };
-          chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+          
+          // Update chat list order to move this chat to the top
+          updateChatListOrder(activeChat);
         }
       }, 50);
       
@@ -1178,7 +1212,9 @@
       };
 
       activeChat.messages = [...activeChat.messages, assistantMsg];
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Update chat list order to move this chat to the top
+      updateChatListOrder(activeChat);
 
       // Set all flags to prevent branch checking during response generation
       isStreaming = true;
@@ -1212,7 +1248,9 @@
                   activeChat.messages = activeChat.messages.map((msg) =>
                     msg.id === assistantId ? { ...msg, content: assistantText } : msg
                   );
-                  chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                  
+                  // Update chat list order to move this chat to the top
+                  updateChatListOrder(activeChat);
                   scrollToBottom();
                 } catch (_) {
                   // ignore malformed lines
@@ -1262,7 +1300,9 @@
         
         // Force a re-render to ensure the navigation buttons appear
         activeChat = { ...activeChat };
-        chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        
+        // Update chat list order to move this chat to the top
+        updateChatListOrder(activeChat);
         
       } catch (e) {
         console.error('Failed to save regenerated message:', e);
@@ -1549,6 +1589,22 @@
     return getBranchMessages(activeChat.messages, selectedBranchId);
   }
 
+
+
+  // Function to update chat list order - move chat with latest activity to top
+  function updateChatListOrder(updatedChat: Chat) {
+    // Remove the updated chat from its current position
+    chats = chats.filter(chat => chat.id !== updatedChat.id);
+    
+    // Add it to the beginning (top) of the list
+    chats = [updatedChat, ...chats];
+    
+    // Update the active chat reference
+    if (activeChat && activeChat.id === updatedChat.id) {
+      activeChat = updatedChat;
+    }
+  }
+
   // Get all available branches for a specific message (enhanced for multi-level trees)
   function getBranchesForMessage(messageId: string): { id: string; preview: string; messageCount: number }[] {
     if (!activeChat || isStreaming || isUpdatingUI || isGeneratingResponse) return [];
@@ -1763,7 +1819,9 @@
       
       // Add the new assistant message to the chat
       activeChat.messages = [...activeChat.messages, newAssistantMsg];
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Update chat list order to move this chat to the top
+      updateChatListOrder(activeChat);
       
       // Clear branch check cache to ensure fresh results after regeneration
       branchCheckCache.clear();
@@ -1805,7 +1863,9 @@
       
       // Force a re-render to show the navigation buttons immediately
       activeChat = { ...activeChat };
-      chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+      
+      // Update chat list order to move this chat to the top
+      updateChatListOrder(activeChat);
       
       // Now get the AI response with streaming using proper branch context
       const branchContext = (() => {
@@ -1826,7 +1886,7 @@
         console.log('=== AI REGENERATION CONTEXT DEBUG ===');
         console.log('Path to user message:', pathToUserMessage.map(m => `${m.role}: ${m.content}`));
         
-        const context = pathToUserMessage.map(({ role, content }) => ({ role, content, chatId: activeChat.id }));
+        const context = pathToUserMessage.map(({ role, content }) => ({ role, content, chatId: activeChat!.id }));
         console.log('final context sent to AI for regeneration:', context);
         
         return context;
@@ -1878,7 +1938,9 @@
                   activeChat.messages = activeChat.messages.map((msg) =>
                     msg.id === newAssistantId ? { ...msg, content: assistantText } : msg
                   );
-                  chats = chats.map((c) => (c.id === activeChat?.id ? activeChat : c));
+                  
+                  // Update chat list order to move this chat to the top
+                  updateChatListOrder(activeChat);
                   scrollToBottom();
                 } catch (_) {
                   // ignore malformed lines
@@ -1914,7 +1976,9 @@
         
         // Force a re-render to ensure the navigation buttons appear
         activeChat = { ...activeChat };
-        chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        
+        // Update chat list order to move this chat to the top
+        updateChatListOrder(activeChat);
         
       } catch (e) {
         console.error('Failed to save regenerated message:', e);
@@ -1966,7 +2030,9 @@
         
         // Force re-render
         activeChat = { ...activeChat };
-        chats = chats.map(c => c.id === activeChat?.id ? activeChat : c);
+        
+        // Update chat list order to move this chat to the top
+        updateChatListOrder(activeChat);
       }
     }
   }
@@ -2296,7 +2362,7 @@
        <!-- Search Input -->
        <div class="mt-3 relative">
          <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-           <svg class="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Search chats (Ctrl+F)">
+           <svg class="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
            </svg>
          </div>
@@ -2317,6 +2383,7 @@
              onclick={() => searchQuery = ''}
              class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 cursor-pointer"
              title="Clear search"
+             aria-label="Clear search"
            >
              <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
@@ -2403,9 +2470,18 @@
                   {#each allResults as result, i}
                     {#if result.type === 'message'}
                       <div class="p-2 bg-blue-50 border border-blue-200 rounded cursor-pointer hover:bg-blue-100 transition-colors" 
+                           role="button"
+                           tabindex="0"
                            onclick={(e) => { 
                              e.stopPropagation(); 
-                             navigateToMessage(chat, result.messageId); 
+                             if (result.messageId) navigateToMessage(chat, result.messageId); 
+                           }}
+                           onkeydown={(e) => {
+                             if (e.key === 'Enter' || e.key === ' ') {
+                               e.preventDefault();
+                               e.stopPropagation();
+                               if (result.messageId) navigateToMessage(chat, result.messageId);
+                             }
                            }}>
                         <div class="flex items-center gap-2 mb-1">
                           <span class="text-xs text-blue-600 font-medium">
@@ -2475,7 +2551,16 @@
                 <!-- Search Navigation Indicator -->
                 {#if highlightedMessageId === message.id}
                   <div class="mb-2 text-center">
-                    <span class="inline-flex items-center gap-2 px-3 py-1 bg-blue-100 text-blue-800 text-xs rounded-full cursor-pointer hover:bg-blue-200 transition-colors" onclick={clearMessageHighlight}>
+                    <span class="inline-flex items-center gap-2 px-3 py-1 bg-blue-100 text-blue-800 text-xs rounded-full cursor-pointer hover:bg-blue-200 transition-colors" 
+                          role="button"
+                          tabindex="0"
+                          onclick={clearMessageHighlight}
+                          onkeydown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              clearMessageHighlight();
+                            }
+                          }}>
                       <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
                         <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"></path>
                       </svg>
@@ -2768,40 +2853,10 @@
     margin: 1rem 0 !important;
   }
   
-  /* Ensure proper whitespace handling for all pre elements */
-  .prose pre {
-    white-space: pre !important;
-    overflow-x: auto;
-  }
-  
-  .prose pre code {
-    white-space: pre !important;
-  }
 
-  .prose div[class*="bg-gray-900"] code:not(.shiki code),
-  .prose div[class*="bg-gray-800"] code:not(.shiki code) {
-    background-color: transparent !important;
-    color: rgb(229 231 235) !important;
-    border: none !important;
-    padding: 0 !important;
-  }
-
-  /* Force all inline code to have dark backgrounds - but not Shiki code */
-  .prose code:not(.shiki code) {
-    background-color: rgb(31 41 55) !important;
-    color: rgb(229 231 235) !important;
-    border: 1px solid rgb(75 85 99) !important;
-  }
 
   /* Additional direct targeting for code blocks - but not Shiki */
   .prose [class*="language-"]:not(.shiki) {
-    background-color: rgb(17 24 39) !important;
-    color: rgb(229 231 235) !important;
-  }
-
-  /* Ensure any element with code-related classes has dark background */
-  .prose [class*="bg-gray-900"],
-  .prose [class*="bg-gray-800"] {
     background-color: rgb(17 24 39) !important;
     color: rgb(229 231 235) !important;
   }
@@ -2854,14 +2909,7 @@
       transform: scale(0.95);
     }
 
-    /* Search highlight styles */
-    mark {
-      background-color: rgb(254 240 138) !important;
-      color: rgb(120 53 15) !important;
-      padding: 0.125rem 0.25rem;
-      border-radius: 0.25rem;
-      font-weight: 500;
-    }
+
 
     /* Search input focus styles */
     .search-input:focus {
