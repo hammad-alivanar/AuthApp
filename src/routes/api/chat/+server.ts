@@ -170,19 +170,18 @@ async function callGoogleGenerativeAI(messages: any[], file: File | null): Promi
   // Add system prompt to ensure markdown formatting
   const systemPrompt = {
     role: 'user',
-    parts: [{ text: `You are a helpful AI programming assistant. Always respond using proper markdown formatting including:
+    parts: [{ text: `You are a helpful AI programming assistant. Format your responses using markdown:
 
 - Use **bold** for emphasis and important terms
 - Use *italic* for code concepts and file names
 - Use \`inline code\` for code snippets, variables, and commands
-- Use \`\`\`language\ncode blocks\n\`\`\` for longer code examples
-- Use # ## ### for headers to organize your responses
-- Use - or * for bullet points in lists
-- Use > for blockquotes when referencing or explaining concepts
-- Use [link text](url) for any relevant links
-- Structure your responses with clear sections using headers
+- Use \`\`\`language\ncode blocks\n\`\`\` for code examples
+- Use # ## for headers when organizing content
+- Use - for bullet points and lists
+- Provide complete, working code examples when requested
+- Be thorough but organized in your responses
 
-Make your responses well-formatted and easy to read.` }]
+When asked for code examples, provide complete, functional implementations with proper syntax highlighting.` }]
   };
 
   // Add file context if available
@@ -202,7 +201,7 @@ Make your responses well-formatted and easy to read.` }]
       temperature: 0.7,
       topK: 40,
       topP: 0.95,
-      maxOutputTokens: 1000,
+      maxOutputTokens: 2048, // Increased for longer code responses
     },
     safetySettings: [
       {
@@ -248,158 +247,25 @@ function generateBasicResponse(messages: any[]): string {
 
   const userQuery = userMessage.content.toLowerCase().trim();
   
-  // Handle specific programming questions
+  // Handle specific programming questions with SHORT responses
   if (userQuery.includes('swap') && userQuery.includes('cpp')) {
-    return `# C++ Variable Swapping Methods
-
-Here are **three different approaches** to swap two variables in C++:
-
-## Method 1: Using a Temporary Variable
-This is the **most common and readable** approach:
+    return `**C++ Variable Swapping:**
 
 \`\`\`cpp
-#include <iostream>
-using namespace std;
-
 void swap(int &a, int &b) {
     int temp = a;
     a = b;
     b = temp;
 }
-
-int main() {
-    int x = 10, y = 20;
-    cout << "Before swap: x = " << x << ", y = " << y << endl;
-    
-    swap(x, y);
-    
-    cout << "After swap: x = " << x << ", y = " << y << endl;
-    return 0;
-}
 \`\`\`
 
-## Method 2: Using XOR (Bitwise)
-This method is **memory-efficient** but only works with integers:
-
-\`\`\`cpp
-#include <iostream>
-using namespace std;
-
-void swapXOR(int &a, int &b) {
-    a = a ^ b;
-    b = a ^ b;
-    a = a ^ b;
-}
-
-int main() {
-    int x = 10, y = 20;
-    cout << "Before swap: x = " << x << ", y = " << y << endl;
-    
-    swapXOR(x, y);
-    
-    cout << "After swap: x = " << x << ", y = " << y << endl;
-    return 0;
-}
-\`\`\`
-
-## Method 3: Using std::swap (C++ Standard Library)
-This is the **most modern and recommended** approach in C++11 and later:
-
-\`\`\`cpp
-#include <iostream>
-#include <algorithm>
-using namespace std;
-
-int main() {
-    int x = 10, y = 20;
-    cout << "Before swap: x = " << x << ", y = " << y << endl;
-    
-    std::swap(x, y);
-    
-    cout << "After swap: x = " << x << ", y = " << y << endl;
-    return 0;
-}
-\`\`\`
-
-## Summary
-- **Method 1** (temporary variable): Most readable and widely used
-- **Method 2** (XOR): Memory-efficient but integer-only
-- **Method 3** (std::swap): Modern, standard library approach
-
-> **Tip**: For production code, prefer **Method 1** for clarity or **Method 3** for modern C++ standards.`;
+Use **temporary variable** for clarity or **std::swap()** for modern C++.`;
   } else if (userQuery === 'hi' || userQuery === 'hello' || userQuery.includes('hi') || userQuery.includes('hello')) {
-    return `# Hello! 👋
-
-I'm your **AI programming assistant** and I'm here to help you with:
-
-## What I Can Help With
-- **Code examples** in various programming languages
-- **Algorithm explanations** and implementations
-- **Debugging help** and problem-solving
-- **Best practices** and coding standards
-- **Code reviews** and optimization tips
-- **Framework and library** guidance
-
-## Getting Started
-Just ask me any programming question! For example:
-- "How do I implement a binary search tree?"
-- "What's the difference between \`let\` and \`const\` in JavaScript?"
-- "Can you help me debug this Python code?"
-
-What would you like to know today?`;
+    return `**Hello! 👋** I'm your AI programming assistant. Ask me any coding question!`;
   } else if (userQuery.includes('help')) {
-    return `# How Can I Help You? 🤔
-
-I'm your **dedicated programming assistant** and I'm here to make your coding journey easier!
-
-## My Capabilities
-- **Code Generation**: Write code in multiple languages
-- **Debugging**: Help identify and fix issues
-- **Explanations**: Break down complex concepts
-- **Best Practices**: Share industry standards
-- **Code Review**: Suggest improvements
-- **Problem Solving**: Algorithm design and optimization
-
-## Programming Languages I Know
-- **Web**: HTML, CSS, JavaScript, TypeScript
-- **Backend**: Python, Node.js, Java, C#, Go
-- **Mobile**: React Native, Flutter, Swift, Kotlin
-- **Data**: SQL, Python (pandas, numpy), R
-- **And many more!**
-
-## Getting the Best Responses
-- Be **specific** about your question
-- Include **code snippets** when relevant
-- Mention the **programming language** you're using
-- Describe what you've **already tried**
-
-> **Ready to code?** Just ask your question and I'll provide a detailed, well-formatted response!`;
+    return `**I can help with:** Code generation, debugging, explanations, best practices, and code reviews. What do you need?`;
   } else {
-    return `# I Understand Your Question
-
-You're asking about: **"${userMessage.content}"**
-
-## Current Status
-I'm currently using **basic responses** since no AI API is configured. To get **intelligent, contextual responses**, please add this environment variable:
-
-\`\`\`bash
-GOOGLE_GENERATIVE_AI_API_KEY=your_google_api_key
-\`\`\`
-
-## What I Can Still Help With
-Even without the AI API, I can assist with:
-- **Basic programming concepts**
-- **Code examples** and templates
-- **Algorithm explanations**
-- **Language-specific syntax**
-- **Common programming patterns**
-
-## Next Steps
-1. **Get a Google AI API key** from [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. **Add it to your environment** variables
-3. **Restart your application**
-
-> **In the meantime**: What specific programming help do you need? I'll do my best to assist you!`;
+    return `**No AI API configured.** Add \`GOOGLE_GENERATIVE_AI_API_KEY\` to get intelligent responses. I can still help with basic programming questions!`;
   }
 }
 
