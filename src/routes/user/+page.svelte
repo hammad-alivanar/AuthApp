@@ -35,7 +35,7 @@
     });
   }
 
-  function getInitials(name: string | null, email: string | null) {
+  function getInitials(name: string | null | undefined, email: string | null | undefined) {
     if (name) {
       return name.split(' ').map(n => n.charAt(0)).join('').toUpperCase().slice(0, 2);
     }
@@ -121,7 +121,7 @@
     <div class="quick-actions">
       <h2 class="section-title">Quick Actions</h2>
       <div class="action-buttons">
-        <a href="/chat" class="action-btn primary">
+        <a href="/chat/new" class="action-btn primary">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
           </svg>
@@ -167,7 +167,7 @@
         </div>
         <h3 class="empty-title">No chats yet</h3>
         <p class="empty-description">Start your first conversation with AI to see your chat history here.</p>
-        <a href="/chat" class="empty-action">Start Your First Chat</a>
+        <a href="/chat/new" class="empty-action">Start Your First Chat</a>
       </div>
     {/if}
   </div>

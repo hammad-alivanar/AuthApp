@@ -115,14 +115,14 @@
           <p>Browse and manage user accounts</p>
         </a>
 
-        <a href="/chat" class="action-card">
+        <a href="/chat/new" class="action-card">
           <div class="action-icon">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
             </svg>
           </div>
-          <h3>Open Chat</h3>
-          <p>Access the chat application</p>
+          <h3>Start New Chat</h3>
+          <p>Create a new conversation</p>
         </a>
 
         <a href="/settings" class="action-card">

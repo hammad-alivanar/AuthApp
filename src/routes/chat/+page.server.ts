@@ -15,7 +15,7 @@ export const load: PageServerLoad = async ({ locals }) => {
   if (userData.disabled) throw redirect(303, `/login?error=disabled&message=${encodeURIComponent('Account is disabled. Please contact an administrator.')}`);
 
   const userId = userData.id;
-  const chatsData = await db.select().from(chat).where(eq(chat.userId, userId)).orderBy(chat.updatedAt as any);
+  const chatsData = await db.select().from(chat).where(eq(chat.userId, userId)).orderBy(chat.updatedAt as any, 'desc');
   
   // Fetch messages for all chats
   const chatsWithMessages = await Promise.all(

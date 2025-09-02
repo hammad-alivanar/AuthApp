@@ -22,7 +22,7 @@
   );
 
   // Add a small delay to prevent header flash on post-login pages
-  let showHeader = false;
+  let showHeader = $state(false);
   $effect(() => {
     if (shouldShowHeader) {
       // Small delay to prevent flash
