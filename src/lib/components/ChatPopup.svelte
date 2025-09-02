@@ -11,6 +11,9 @@
   let loading = false;
   let error: string | null = null;
   let messages: Message[] = [];
+  let fileInput: HTMLInputElement;
+  let isUploading = false;
+  let uploadProgress = '';
 
   function toggle() {
     isOpen = !isOpen;
@@ -42,7 +45,7 @@
         throw new Error('No valid messages to send');
       }
 
-      const res = await fetch('/api/chat', {
+      const res = await fetch('/api/chat/rag', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ messages: validMessages.map(({ role, content }) => ({ role, content })) })
@@ -109,6 +112,92 @@
       sendMessage();
     }
   }
+
+  async function handleFileUpload(event: Event) {
+    const target = event.target as HTMLInputElement;
+    const file = target.files?.[0];
+    
+    if (!file) return;
+    
+    // Check file type
+    if (!file.type.startsWith('text/') && !file.name.endsWith('.txt') && !file.name.endsWith('.md')) {
+      error = 'Please upload a text file (.txt, .md) or a file with text content.';
+      return;
+    }
+    
+    // Check file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      error = 'File size must be less than 5MB.';
+      return;
+    }
+    
+    isUploading = true;
+    uploadProgress = 'Reading file...';
+    error = null;
+    
+    try {
+      // Read file content
+      const content = await file.text();
+      uploadProgress = 'Processing document...';
+      
+      // Prepare document data
+      const documentData = {
+        title: file.name,
+        content: content,
+        source: `Uploaded: ${file.name}`,
+        mimeType: file.type || 'text/plain'
+      };
+      
+      uploadProgress = 'Ingesting document...';
+      
+      // Call ingestion API
+      const response = await fetch('/api/ingest', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(documentData),
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to ingest document');
+      }
+      
+      const result = await response.json();
+      
+      // Add a system message to the chat about the uploaded document
+      const systemMsg: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: `📄 **Document uploaded successfully!**\n\nI've ingested "${file.name}" with ${result.chunksCount} chunks. You can now ask me questions about this document.`
+      };
+      
+      messages = [...messages, systemMsg];
+      
+      uploadProgress = 'Document ready!';
+      
+      // Clear the file input
+      if (fileInput) {
+        fileInput.value = '';
+      }
+      
+      // Show success message briefly
+      setTimeout(() => {
+        uploadProgress = '';
+      }, 2000);
+      
+    } catch (err: any) {
+      error = err?.message || 'Failed to upload document';
+      console.error('File upload error:', err);
+    } finally {
+      isUploading = false;
+    }
+  }
+
+  function triggerFileUpload() {
+    fileInput?.click();
+  }
 </script>
 
 <style>
@@ -159,15 +248,48 @@
           bind:value={input}
           on:keydown={onKeyDown}
         ></textarea>
-        <button
-          class="btn btn-primary px-3 py-2 text-sm cursor-pointer"
-          on:click={sendMessage}
-          disabled={loading}
-        >
-          {loading ? '...' : 'Send'}
-        </button>
+        <div class="flex gap-1">
+          <!-- File Upload Button -->
+          <button
+            class="btn btn-primary px-2 py-2 text-sm cursor-pointer bg-blue-600 hover:bg-blue-700"
+            on:click={triggerFileUpload}
+            disabled={isUploading || loading}
+            title="Upload document"
+          >
+            📄
+          </button>
+          <button
+            class="btn btn-primary px-3 py-2 text-sm cursor-pointer"
+            on:click={sendMessage}
+            disabled={loading}
+          >
+            {loading ? '...' : 'Send'}
+          </button>
+        </div>
       </div>
-      <div class="mt-1 text-[10px] text-gray-500">Press Enter to send</div>
+      
+      <!-- Hidden file input -->
+      <input
+        type="file"
+        bind:this={fileInput}
+        on:change={handleFileUpload}
+        accept=".txt,.md,text/*"
+        style="display: none;"
+      />
+      
+      <!-- Upload progress indicator -->
+      {#if isUploading}
+        <div class="mt-2 p-2 bg-blue-50 border border-blue-200 rounded text-blue-700 text-xs text-center">
+          <div class="flex items-center justify-center gap-1">
+            <svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+            {uploadProgress}
+          </div>
+        </div>
+      {/if}
+      
+      <div class="mt-1 text-[10px] text-gray-500">Press Enter to send • Click 📄 to upload</div>
     </div>
   </div>
 {/if}

@@ -9,7 +9,13 @@
     messages: any[];
   };
 
-  type Message = { id: string; role: 'user' | 'assistant'; content: string; timestamp: Date; parentId?: string | null };
+  type Message = { 
+    id: string; 
+    role: 'user' | 'assistant'; 
+    content: string; 
+    timestamp: Date; 
+    citations?: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }>;
+  };
   type Chat = { id: string; title: string; messages: Message[]; createdAt: Date };
 
   let chats: Chat[] = [];
@@ -21,6 +27,15 @@
 
   let renamingChatId: string | null = null;
   let renameInput = '';
+
+  let fileInput: HTMLInputElement;
+  let uploadedFile: File | null = null;
+  let isUploading = false;
+  let uploadProgress = '';
+  let attachedFiles: Array<{file: File, documentId?: string, chunksCount?: number}> = [];
+  let citationExpanded: Record<string, boolean> = {};
+  let contextExpanded: Record<string, boolean> = {};
+  let hljsReady = false;
   let editingMessageId: string | null = null;
   let editInput = '';
   let editingMessage: Message | null = null;
@@ -32,6 +47,7 @@
   let isSearching = false; // Search loading state
   let highlightedMessageId: string | null = null; // Message to highlight after search navigation
   let searchNavigationTimeout: ReturnType<typeof setTimeout> | null; // Timeout for clearing highlight
+
 
   // Minimal action to inject trusted HTML (generated locally)
   export function setHtml(node: HTMLElement, params: { html: string }) {
@@ -45,6 +61,7 @@
       }
     };
   }
+
 
   // Copy to clipboard function
   async function copyToClipboard(text: string, buttonElement?: HTMLElement) {
@@ -125,6 +142,55 @@
   function renderMarkdownLite(src: string): string {
     let text = src || '';
     
+    // Remove the first in-text Citations/References/Sources heading and its immediate list
+    {
+      const lines = text.split('\n');
+      const kept: string[] = [];
+      let i = 0;
+      let removed = false;
+      while (i < lines.length) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        const isCitationHeading = !removed && /^(?:#{1,6}\s*)?(?:\*\*|__)?\s*(Citations|References|Sources)\s*:?(?:\*\*|__)?\s*$/i.test(trimmed);
+        if (isCitationHeading) {
+          removed = true;
+          i++;
+          // Skip following list-like reference lines and blanks
+          while (i < lines.length) {
+            const t = lines[i].trim();
+            const isListy = /^([-*+]\s+|\d+\.\s+|\[(?:\d+(?:\s*,\s*\d+)*)\]|Source\s*\d+(?:\s*,\s*Chunk\s*\d+)?)/i.test(t) || t === '';
+            if (isListy) {
+              i++;
+              continue;
+            }
+            break;
+          }
+          continue;
+        }
+        kept.push(line);
+        i++;
+      }
+      text = kept.join('\n');
+    }
+    
+    // Strip any inline citation superscripts injected in the content
+    text = text.replace(/<sup[^>]*class="[^"]*\bcitation-sup\b[^"]*"[^>]*>[\s\S]*?<\/sup>/gi, '');
+
+    // Remove lines that echo retrieved chunk metadata (e.g., "... .pdf, Chunk #9: ...")
+    {
+      const lines = text.split('\n');
+      const filtered: string[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        const looksLikeDocChunk = /\.(pdf|txt|md|docx)\b[^\n]*\bChunk\s*#?\d+/i.test(trimmed) || /^Source\s*\d+(?:\s*,\s*Chunk\s*\d+)?/i.test(trimmed);
+        if (looksLikeDocChunk) {
+          continue;
+        }
+        filtered.push(lines[i]);
+      }
+      text = filtered.join('\n');
+    }
+    
     // Headers (# ## ###)
     text = text.replace(/^### (.*$)/gim, '<h3 class="text-lg font-semibold mt-4 mb-2">$1</h3>');
     text = text.replace(/^## (.*$)/gim, '<h2 class="text-xl font-semibold mt-4 mb-2">$1</h2>');
@@ -173,6 +239,10 @@
     // Links [text](url)
     text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="text-blue-600 hover:text-blue-800 underline" target="_blank" rel="noopener noreferrer">$1</a>');
     
+    // Remove inline numeric citations like [1] or [1, 2, 3] that are not links
+    text = text.replace(/\s*\[(\d+(?:\s*,\s*\d+)*)\](?!\()/g, '');
+    
+    
     // Unordered lists (- * +)
     text = text.replace(/^[\s]*[-*+][\s]+(.*)/gim, '<li class="ml-4">$1</li>');
     text = text.replace(/(<li.*<\/li>)/s, '<ul class="list-disc ml-6 my-2">$1</ul>');
@@ -189,7 +259,7 @@
     
     // Tables (basic support)
     text = text.replace(/\|(.+)\|/g, (match, content) => {
-      const cells = content.split('|').map(cell => `<td class="border border-gray-300 px-3 py-2">${cell.trim()}</td>`).join('');
+      const cells = content.split('|').map((cell: string) => `<td class="border border-gray-300 px-3 py-2">${cell.trim()}</td>`).join('');
       return `<tr>${cells}</tr>`;
     });
     text = text.replace(/(<tr>.*<\/tr>)/s, '<table class="border-collapse border border-gray-300 my-4 w-full">$1</table>');
@@ -218,6 +288,31 @@
     return processedLines.join('');
   }
 
+  // Compute top 2 documents from citations by frequency; return representative entries
+  function getTopCitations(
+    citations?: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }>
+  ): Array<{ source_doc: string; chunk_id: string; snippet: string }> {
+    if (!citations || citations.length === 0) return [];
+    const docToInfo: Map<string, { count: number; first: { source_doc: string; chunk_id: string; snippet: string } }> = new Map();
+    for (const c of citations) {
+      const key = c.source_doc;
+      const existing = docToInfo.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        docToInfo.set(key, { count: 1, first: { source_doc: c.source_doc, chunk_id: c.chunk_id, snippet: c.snippet } });
+      }
+    }
+    const sorted = Array.from(docToInfo.entries()).sort((a, b) => b[1].count - a[1].count);
+    return sorted.slice(0, 2).map(([, info]) => info.first);
+  }
+
+  function getTopDocCount(
+    citations?: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }>
+  ): number {
+    if (!citations || citations.length === 0) return 0;
+    const unique = new Set(citations.map(c => c.source_doc));
+    return Math.min(2, unique.size);
   // Svelte action to apply syntax highlighting to code blocks
   async function applySyntaxHighlighting(node: HTMLElement) {
     if (!browser) return;
@@ -324,6 +419,7 @@
     const shouldCreateNew = urlParams.get('new') === 'true';
     
     // Convert DB data to local format
+    ensureHighlightJs();
     if (data.chats && data.chats.length > 0) {
       chats = data.chats.map((chat: any) => ({
         id: chat.id,
@@ -332,9 +428,8 @@
         messages: chat.messages ? chat.messages.map((msg: any) => ({
           id: msg.id,
           role: msg.role,
-          content: msg.content,
-          timestamp: new Date(msg.createdAt),
-          parentId: msg.parentId
+          content: msg.content ? msg.content.trim() : '',
+          timestamp: new Date(msg.createdAt)
         })) : []
       }));
       
@@ -485,9 +580,8 @@
               chat.messages = data.messages.map((msg: any) => ({
                 id: msg.id,
                 role: msg.role,
-                content: msg.content,
-                timestamp: new Date(msg.createdAt),
-                parentId: msg.parentId
+                content: msg.content ? msg.content.trim() : '',
+                timestamp: new Date(msg.createdAt)
               }));
             } else {
               chat.messages = [];
@@ -604,14 +698,14 @@
                     id: msg.id,
                     role: msg.role,
                     content: msg.content,
-                    timestamp: new Date(msg.createdAt),
-                    parentId: msg.parentId
+                    timestamp: new Date(msg.createdAt)
                   })) : []
                 }));
                 
                 // Update active chat if it still exists
-                if (activeChat) {
-                  const updatedActiveChat = chats.find(c => c.id === activeChat.id);
+                const activeChatId = activeChat?.id;
+                if (activeChatId) {
+                  const updatedActiveChat = chats.find(c => c.id === activeChatId);
                   if (updatedActiveChat) {
                     activeChat = updatedActiveChat;
                     // CRITICAL FIX: Refresh branches for the updated chat
@@ -659,25 +753,136 @@
 
   async function sendMessage() {
     const text = input.trim();
-    if (!text || loading || !activeChat) return;
+    if ((!text && attachedFiles.length === 0) || loading || !activeChat) return;
     
     console.log('Sending message with text:', text);
+    if (activeChat) {
     console.log('Active chat messages count:', activeChat.messages.length);
+    }
+    console.log('Attached files:', attachedFiles.length);
+    
+    // Process attached files first if any
+    if (attachedFiles.length > 0) {
+      isUploading = true;
+      uploadProgress = 'Processing attached files...';
+      
+      try {
+        for (let i = 0; i < attachedFiles.length; i++) {
+          const attachedFile = attachedFiles[i];
+          if (attachedFile.documentId) continue; // Already processed
+          
+          uploadProgress = `Processing ${attachedFile.file.name}...`;
+          
+          // Show OCR processing message for PDFs
+          if (attachedFile.file.type === 'application/pdf') {
+            uploadProgress = `Processing ${attachedFile.file.name} (may take longer for scanned documents)...`;
+          }
+          
+          // Handle file upload based on type
+          let response;
+          
+          if (attachedFile.file.type === 'application/pdf') {
+            // For PDF files, use multipart/form-data upload
+            const formData = new FormData();
+            formData.append('file', attachedFile.file);
+            
+            response = await fetch('/api/ingest', {
+              method: 'POST',
+              body: formData,
+            });
+          } else {
+            // For text files, read content and send as JSON
+            const content = await attachedFile.file.text();
+            
+            const documentData = {
+              title: attachedFile.file.name,
+              content: content,
+              source: `Uploaded: ${attachedFile.file.name}`,
+              mimeType: attachedFile.file.type || 'text/plain'
+            };
+            
+            response = await fetch('/api/ingest', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(documentData),
+            });
+          }
+          
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(`Failed to process ${attachedFile.file.name}: ${errorData.error || 'Unknown error'}`);
+          }
+          
+          const result = await response.json();
+          
+          // Update the attached file with document info
+          attachedFiles[i] = {
+            ...attachedFile,
+            documentId: result.documentId,
+            chunksCount: result.chunksCount
+          };
+          
+          // Log success to terminal (not chat)
+          console.log(`✅ Document uploaded successfully: ${attachedFile.file.name} (${result.chunksCount} chunks)`);
+        }
+      } catch (err: any) {
+        error = err?.message || 'Failed to process attached files';
+        console.error('File processing error:', err);
+        isUploading = false;
+        return;
+      } finally {
+        isUploading = false;
+        uploadProgress = '';
+      }
+    }
     
     input = '';
     error = null;
 
+    // Create user message content - keep it clean for the user
+    let userContent = text;
+    if (attachedFiles.length > 0) {
+      const fileInfo = attachedFiles.map(af => `📄 ${af.file.name}`).join('\n');
+      userContent = text ? `${text}\n\n**Attached Files:**\n${fileInfo}` : `**Attached Files:**\n${fileInfo}`;
+    }
+
+    // Create internal prompt for AI (not shown to user)
+    let internalPrompt = userContent;
+    
+    // Only create document summary prompt if there's no text AND files are attached
+    // This prevents treating "upload + question" as a summary request
+    if (!text && attachedFiles.length > 0) {
+      internalPrompt = `Please provide a comprehensive summary of the attached document(s) and suggest what questions I can ask about the content. Include:
+
+1. **Document Summary**: A structured overview of the main content
+2. **Key Topics**: Main themes and subjects covered
+3. **Suggested Questions**: 5-7 specific questions I can ask about this document
+
+**Attached Files:**
+${attachedFiles.map(af => `📄 ${af.file.name}`).join('\n')}`;
+    } else if (text && attachedFiles.length > 0) {
+      // User provided both text (question) and files - treat as a question about the documents
+      internalPrompt = `${text}
+
+**Attached Files:**
+${attachedFiles.map(af => `📄 ${af.file.name}`).join('\n')}
+
+Please answer my question based on the content of the attached documents.`;
+    }
+
     const userMsg: Message = { 
       id: crypto.randomUUID(), 
       role: 'user', 
-      content: text,
+      content: userContent,
       timestamp: new Date()
     };
 
     console.log('Created userMsg:', userMsg);
 
     // Update chat title if it's the first message
-    if (activeChat.messages.length === 0) {
+    if (activeChat && activeChat.messages.length === 0) {
       activeChat.title = text.length > 50 ? text.substring(0, 50) + '...' : text;
       
       // Save the updated title to the database
@@ -693,17 +898,13 @@
       }
     }
 
+
          // CRITICAL FIX: compute parent for tree fork based on currently displayed messages
      // This fixes the branching issue where new messages were incorrectly routed to edited branches
      // instead of continuing from the user's current viewing position in the conversation tree
      const displayedMessages = selectedBranchId ? getBranchMessages(activeChat.messages, selectedBranchId) : activeChat.messages;
      let parentId = displayedMessages.length > 0 ? displayedMessages[displayedMessages.length - 1].id : null;
      
-     console.log('=== sendMessage parent detection ===');
-     console.log('selectedBranchId:', selectedBranchId);
-     console.log('displayedMessages count:', displayedMessages.length);
-     console.log('last displayed message:', displayedMessages.length > 0 ? displayedMessages[displayedMessages.length - 1].content.substring(0, 50) : 'none');
-     console.log('parentId for new message:', parentId);
 
     loading = true;
     scrollToBottom();
@@ -752,14 +953,19 @@
       // Update chat list order to move this chat to the top
       updateChatListOrder(activeChat);
       
-      
 
-             const res = await fetch('/api/chat', {
-         method: 'POST',
-         body: JSON.stringify({ messages: validBranchMessages }),
-         headers: { 'content-type': 'application/json' },
-         signal: abortController.signal
-       });
+      const res = await fetch('/api/chat/rag', {
+        method: 'POST',
+        body: JSON.stringify({
+          messages: validBranchMessages,
+          documentIds: attachedFiles
+            .map(af => af.documentId)
+            .filter((id) => typeof id === 'string' && id.length > 0),
+          summaryRequest: (!text && attachedFiles.length > 0)
+        }),
+        headers: { 'content-type': 'application/json' },
+        signal: abortController.signal
+      });
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -774,6 +980,7 @@
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
       let assistantText = '';
+      let citations: Array<{ id: number; source_doc: string; chunk_id: string; snippet: string; }> = [];
       
       // Add placeholder message for streaming
       const assistantId = crypto.randomUUID();
@@ -781,8 +988,7 @@
         id: assistantId, 
         role: 'assistant', 
         content: '',
-        timestamp: new Date(),
-        parentId: userMsg.id
+        timestamp: new Date()
       };
       
       activeChat.messages = [...activeChat.messages, assistantMsg];
@@ -821,6 +1027,38 @@
                 }
               }
             }
+            
+            // Handle completion data with citations (type 1)
+            const completeMatch = line.match(/^1:(.*)$/);
+            if (completeMatch) {
+              try {
+                const data = JSON.parse(completeMatch[1]);
+                if (data.type === 'complete' && data.citations) {
+                  citations = data.citations;
+                  // Store citations in the message for tooltip rendering
+                  activeChat.messages = activeChat.messages.map((msg) =>
+                    msg.id === assistantId ? { ...msg, content: assistantText, citations: citations } : msg
+                  );
+                  chats = chats.map((c) => (activeChat && c.id === activeChat.id ? activeChat : c));
+                  
+                  // Setup tooltips after citations are added with multiple attempts
+                  setTimeout(() => {
+                    setupCitationTooltips();
+                  }, 100);
+                  
+                  // Additional setup attempts to ensure tooltips work
+                  setTimeout(() => {
+                    setupCitationTooltips();
+                  }, 300);
+                  
+                  setTimeout(() => {
+                    setupCitationTooltips();
+                  }, 500);
+                }
+              } catch (_) {
+                // ignore malformed lines
+              }
+            }
           }
         } catch (streamError) {
           console.error('Error during streaming:', streamError);
@@ -837,7 +1075,6 @@
           body: JSON.stringify({
             id: userMsg.id,
             chatId: activeChat.id,
-            parentId: parentId, // Use the computed parentId
             role: userMsg.role,
             content: userMsg.content
           })
@@ -849,7 +1086,6 @@
           body: JSON.stringify({
             id: assistantId,
             chatId: activeChat.id,
-            parentId: userMsg.id,
             role: 'assistant',
             content: assistantText
           })
@@ -905,6 +1141,7 @@
     } finally {
       loading = false;
       abortController = null;
+      attachedFiles = [];
       isStreaming = false; // Reset streaming flag
       isUpdatingUI = false; // Reset UI update flag
       isGeneratingResponse = false; // Reset response generation flag
@@ -967,7 +1204,111 @@
       scrollToBottom();
       didInitialScroll = true;
     }
+    
+    // Setup citation tooltips
+    setupCitationTooltips();
+    // Apply syntax highlighting after DOM updates
+    applySyntaxHighlighting();
   });
+  
+  // Setup citation tooltips
+  function setupCitationTooltips() {
+    if (typeof window === 'undefined') return;
+    
+    // Remove existing tooltips
+    const existingTooltips = document.querySelectorAll('.citation-tooltip');
+    existingTooltips.forEach(tooltip => tooltip.remove());
+    
+    // Add event listeners to citation elements
+    const citationElements = document.querySelectorAll('.citation-sup');
+    console.log('🔍 Found citation elements:', citationElements.length);
+    
+    if (citationElements.length === 0) {
+      console.log('🔍 No citation elements found, trying again in 100ms...');
+      setTimeout(() => setupCitationTooltips(), 100);
+      return;
+    }
+    
+    citationElements.forEach((element, index) => {
+      console.log(`🔍 Setting up tooltip for citation ${index + 1}:`, element);
+      
+      // Remove existing event listeners to prevent duplicates
+      element.removeEventListener('mouseenter', showCitationTooltip);
+      element.removeEventListener('mouseleave', hideCitationTooltip);
+      
+      // Add new event listeners
+      element.addEventListener('mouseenter', showCitationTooltip);
+      element.addEventListener('mouseleave', hideCitationTooltip);
+    });
+  }
+  
+  function showCitationTooltip(event: Event) {
+    const element = event.target as HTMLElement;
+    const citationId = element.getAttribute('data-citation-id');
+    const sourceDoc = element.getAttribute('data-source-doc');
+    const chunkId = element.getAttribute('data-chunk-id');
+    const snippet = element.getAttribute('data-snippet');
+    
+    if (!citationId || !sourceDoc || !chunkId || !snippet) {
+      console.warn('Missing citation data for tooltip');
+      return;
+    }
+    
+    // Remove existing tooltips
+    const existingTooltips = document.querySelectorAll('.citation-tooltip');
+    existingTooltips.forEach(tooltip => tooltip.remove());
+    
+    // Create tooltip with improved styling and content truncation
+    const tooltip = document.createElement('div');
+    tooltip.className = 'citation-tooltip fixed z-50 bg-white border border-gray-300 rounded-xl shadow-lg p-3 max-w-md';
+    
+    // Truncate snippet to 1-2 lines (approximately 150 characters)
+    const truncatedSnippet = snippet.length > 150 ? snippet.substring(0, 150) + '...' : snippet;
+    
+    tooltip.innerHTML = `
+      <div class="text-sm font-semibold text-gray-900 mb-1">${sourceDoc}</div>
+      <div class="text-xs text-gray-500 mb-2 font-mono">${chunkId}</div>
+      <div class="text-sm text-gray-700 leading-relaxed">${truncatedSnippet}</div>
+    `;
+    
+    document.body.appendChild(tooltip);
+    
+    // Position tooltip with improved logic
+    const rect = element.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    
+    // Calculate initial position (centered above the citation)
+    let left = rect.left + (rect.width / 2) - (tooltipRect.width / 2);
+    let top = rect.top - tooltipRect.height - 8;
+    
+    // Adjust if tooltip goes off screen horizontally
+    if (left < 12) left = 12;
+    if (left + tooltipRect.width > window.innerWidth - 12) {
+      left = window.innerWidth - tooltipRect.width - 12;
+    }
+    
+    // Adjust if tooltip goes off screen vertically (show below instead)
+    if (top < 12) {
+      top = rect.bottom + 8;
+    }
+    
+    // Ensure tooltip stays within viewport
+    if (top + tooltipRect.height > window.innerHeight - 12) {
+      top = window.innerHeight - tooltipRect.height - 12;
+    }
+    
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  }
+  
+  function hideCitationTooltip() {
+    const tooltips = document.querySelectorAll('.citation-tooltip');
+    tooltips.forEach(tooltip => {
+      // Add fade-out animation before removing
+      (tooltip as HTMLElement).style.animation = 'fadeOut 0.1s ease-in forwards';
+      setTimeout(() => tooltip.remove(), 100);
+    });
+  }
 
   function onKeyDown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -992,6 +1333,55 @@
         selectNextBranch();
       }
     }
+  }
+  async function handleFileUpload(event: Event) {
+    const target = event.target as HTMLInputElement;
+    const file = target.files?.[0];
+    
+    if (!file) return;
+    
+    // Check file type - now supporting PDF files
+    const allowedTypes = ['text/plain', 'text/markdown', 'application/pdf'];
+    const allowedExtensions = ['.txt', '.md', '.pdf'];
+    const hasValidType = allowedTypes.includes(file.type) || 
+                        allowedExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
+    
+    if (!hasValidType) {
+      error = 'Please upload a text file (.txt, .md) or PDF file (.pdf).';
+      return;
+    }
+    
+    // Check file size (max 10MB for PDFs, 5MB for text files)
+    const maxSize = file.type === 'application/pdf' ? 10 * 1024 * 1024 : 5 * 1024 * 1024;
+    if (file.size > maxSize) {
+      error = `File size must be less than ${file.type === 'application/pdf' ? '10MB' : '5MB'}.`;
+      return;
+    }
+    
+    // Check if file is already attached
+    if (attachedFiles.some(af => af.file.name === file.name && af.file.size === file.size)) {
+      error = 'This file is already attached.';
+      return;
+    }
+    
+    // Add file to attached files list
+    attachedFiles = [...attachedFiles, { file }];
+    
+    // Clear the file input
+    if (fileInput) {
+      fileInput.value = '';
+    }
+    
+    // Clear any previous errors
+    error = null;
+  }
+
+  function triggerFileUpload() {
+    fileInput?.click();
+  }
+
+  function removeAttachedFile(index: number) {
+    attachedFiles = attachedFiles.filter((_, i) => i !== index);
   }
 
 
@@ -1067,6 +1457,46 @@
     // Create new AbortController for this request
     abortController = new AbortController();
 
+    <!-- Input Area -->
+    <div class="border-t border-gray-200 p-4">
+      
+      <!-- Attached Files -->
+      {#if attachedFiles.length > 0 && !loading}
+        <div class="mb-3 p-3 rounded-lg border border-blue-200 bg-blue-50">
+          <div class="flex items-center gap-2 mb-2">
+            <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+            </svg>
+            <span class="text-sm font-medium text-blue-900">Attached Files ({attachedFiles.length})</span>
+          </div>
+          <div class="space-y-2">
+            {#each attachedFiles as attachedFile, index}
+              <div class="flex items-center justify-between p-2 bg-white rounded border border-blue-200">
+                <div class="flex items-center gap-2">
+                  <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                  </svg>
+                  <span class="text-sm text-blue-900">{attachedFile.file.name}</span>
+                  {#if attachedFile.chunksCount}
+                    <span class="text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded">✓ Processed ({attachedFile.chunksCount} chunks)</span>
+                  {/if}
+                </div>
+                <button 
+                  class="text-red-600 hover:text-red-800 cursor-pointer p-1" 
+                  aria-label="Remove file" 
+                  title="Remove file"
+                  onclick={() => removeAttachedFile(index)}
+                >
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                  </svg>
+                </button>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+=======
     try {
       // Find the original message being edited
       const originalMessage = activeChat.messages.find(m => m.id === messageIdToEdit);
@@ -2758,50 +3188,89 @@
 
     <!-- Input Area -->
     <div class="border-t border-gray-200 p-4">
-      
-      
+
 
       <div class="flex items-end gap-3">
         <div class="flex-1">
           <textarea
-            class="w-full resize-none rounded-2xl border border-gray-300 px-4 py-3 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            class="w-full resize-none rounded-2xl border border-gray-300 px-4 py-3 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
             rows="1"
             placeholder="Type your message..."
             bind:value={input}
             onkeydown={onKeyDown}
+            disabled={loading}
             style="min-height: 44px; max-height: 120px;"
           ></textarea>
         </div>
         
-                 <div class="flex gap-2">
-                       <button
-              onclick={sendMessage}
-              disabled={loading || !input.trim()}
-              class="p-3 bg-green-600 text-white rounded-full hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transition-all duration-200 cursor-pointer"
-              aria-label="Send message"
+        <div class="flex gap-2">
+          <!-- File Upload Button -->
+          <button
+            onclick={triggerFileUpload}
+            disabled={isUploading || loading}
+            class="p-3 bg-blue-600 text-white rounded-full hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+            aria-label="Attach document"
+            title="Attach document"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+            </svg>
+          </button>
+          
+          <!-- Send Button -->
+          <button
+            onclick={sendMessage}
+            disabled={loading || (!input.trim() && attachedFiles.length === 0)}
+            class="p-3 bg-green-600 text-white rounded-full hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+            aria-label="Send message"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+            </svg>
+          </button>
+          
+          {#if loading}
+            <button
+              onclick={stopResponse}
+              class="p-3 bg-red-600 text-white rounded-full hover:bg-red-700 transition-colors cursor-pointer"
+              aria-label="Stop response"
+              title="Stop response"
             >
-             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
-             </svg>
-           </button>
-           {#if loading}
-                           <button
-                onclick={stopResponse}
-                class="p-3 bg-red-600 text-white rounded-full hover:bg-red-700 active:scale-95 transition-all duration-200 cursor-pointer"
-                aria-label="Stop response"
-                title="Stop response"
-              >
-               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-               </svg>
-             </button>
-           {/if}
-         </div>
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+              </svg>
+            </button>
+          {/if}
+        </div>
       </div>
       
-                           <div class="mt-2 text-xs text-gray-500 text-center">
-          Press Enter to send, Shift+Enter for new line
+      <!-- Hidden file input -->
+      <input
+        type="file"
+        bind:this={fileInput}
+        onchange={handleFileUpload}
+        accept=".txt,.md,.pdf,text/*,application/pdf"
+        style="display: none;"
+      />
+      
+      <!-- Upload progress indicator -->
+      {#if isUploading}
+        <div class="mt-2 p-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-700 text-sm text-center">
+          <div class="flex items-center justify-center gap-2">
+            <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+            {uploadProgress}
+          </div>
         </div>
+      {/if}
+      
+      <div class="mt-2 text-xs text-gray-500 text-center">
+        Press Enter to send, Shift+Enter for new line • Click 📄 to attach documents (PDF, TXT, MD)
+        <br>
+        <span class="text-blue-600">💡 PDF Tip: Now supports scanned documents and handwritten text via OCR!</span>
+      </div>
+
     </div>
   </div>
 </div>
@@ -2860,6 +3329,7 @@
     background-color: rgb(17 24 39) !important;
     color: rgb(229 231 235) !important;
   }
+
 
      /* Force user message text to be white */
    .bg-indigo-600 {
@@ -3010,5 +3480,45 @@
   :global(.prose pre.shiki code) {
     color: inherit;
     background: transparent !important;
+  }
+
+  /* Citation tooltip styles */
+  .citation-sup {
+    transition: all 0.2s ease;
+    position: relative;
+  }
+
+  .citation-sup:hover {
+    transform: scale(1.05);
+  }
+
+  .citation-tooltip {
+    animation: fadeIn 0.15s ease-out;
+    pointer-events: none;
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(209, 213, 219, 0.8);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes fadeOut {
+    from {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+    to {
+      opacity: 0;
+      transform: translateY(8px) scale(0.95);
+    }
   }
 </style>

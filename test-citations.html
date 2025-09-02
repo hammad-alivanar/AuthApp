@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Citation Tooltip Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .test-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        /* Citation tooltip styles */
+        .citation-sup {
+            transition: all 0.2s ease;
+            position: relative;
+            cursor: pointer;
+            color: #2563eb;
+            font-weight: 600;
+        }
+
+        .citation-sup:hover {
+            transform: scale(1.05);
+            color: #1d4ed8;
+        }
+
+        .citation-tooltip {
+            animation: fadeIn 0.15s ease-out;
+            pointer-events: none;
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(209, 213, 219, 0.8);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(8px) scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        @keyframes fadeOut {
+            from {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+            to {
+                opacity: 0;
+                transform: translateY(8px) scale(0.95);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h1>Citation Tooltip Test</h1>
+        <p>This is a test to verify that citation tooltips work correctly. Hover over the superscript citations below:</p>
+        
+        <div class="test-content">
+            <p>The Israel-Palestine conflict has resulted in significant humanitarian crises, displacement, and repeated cycles of violence 
+            <sup class="citation-sup" 
+                data-citation-id="1" 
+                data-source-doc="Israel_info.txt" 
+                data-chunk-id="chunk_4" 
+                data-snippet="The conflict has caused significant humanitarian crises, displacement, and cycles of violence. Peace efforts have been attempted multiple times but a lasting resolution remains elusive.">[1]</sup>. 
+            While peace efforts have been made, a lasting resolution remains elusive 
+            <sup class="citation-sup" 
+                data-citation-id="2" 
+                data-source-doc="Israel_info.txt" 
+                data-chunk-id="chunk_5" 
+                data-snippet="Multiple peace initiatives have been attempted including the Oslo Accords, Camp David Summit, and various UN resolutions. However, fundamental issues remain unresolved.">[2]</sup>.</p>
+        </div>
+        
+        <div class="test-instructions">
+            <h3>Test Instructions:</h3>
+            <ol>
+                <li>Hover over the blue superscript numbers [1] and [2] above</li>
+                <li>You should see a tooltip appear with document information</li>
+                <li>The tooltip should show: document name, chunk ID, and text snippet</li>
+                <li>Move your mouse away to hide the tooltip</li>
+            </ol>
+        </div>
+        
+        <div class="test-status">
+            <h3>Test Status:</h3>
+            <div id="status">Ready to test - hover over citations above</div>
+        </div>
+    </div>
+
+    <script>
+        function showCitationTooltip(event) {
+            const element = event.target;
+            const citationId = element.getAttribute('data-citation-id');
+            const sourceDoc = element.getAttribute('data-source-doc');
+            const chunkId = element.getAttribute('data-chunk-id');
+            const snippet = element.getAttribute('data-snippet');
+            
+            if (!citationId || !sourceDoc || !chunkId || !snippet) {
+                console.warn('Missing citation data for tooltip');
+                return;
+            }
+            
+            // Remove existing tooltips
+            const existingTooltips = document.querySelectorAll('.citation-tooltip');
+            existingTooltips.forEach(tooltip => tooltip.remove());
+            
+            // Create tooltip
+            const tooltip = document.createElement('div');
+            tooltip.className = 'citation-tooltip fixed z-50 bg-white border border-gray-300 rounded-xl shadow-lg p-3 max-w-md';
+            
+            // Truncate snippet
+            const truncatedSnippet = snippet.length > 150 ? snippet.substring(0, 150) + '...' : snippet;
+            
+            tooltip.innerHTML = `
+                <div class="text-sm font-semibold text-gray-900 mb-1">${sourceDoc}</div>
+                <div class="text-xs text-gray-500 mb-2 font-mono">${chunkId}</div>
+                <div class="text-sm text-gray-700 leading-relaxed">${truncatedSnippet}</div>
+            `;
+            
+            document.body.appendChild(tooltip);
+            
+            // Position tooltip
+            const rect = element.getBoundingClientRect();
+            const tooltipRect = tooltip.getBoundingClientRect();
+            
+            let left = rect.left + (rect.width / 2) - (tooltipRect.width / 2);
+            let top = rect.top - tooltipRect.height - 8;
+            
+            // Adjust if tooltip goes off screen
+            if (left < 12) left = 12;
+            if (left + tooltipRect.width > window.innerWidth - 12) {
+                left = window.innerWidth - tooltipRect.width - 12;
+            }
+            if (top < 12) {
+                top = rect.bottom + 8;
+            }
+            if (top + tooltipRect.height > window.innerHeight - 12) {
+                top = window.innerHeight - tooltipRect.height - 12;
+            }
+            
+            tooltip.style.left = `${left}px`;
+            tooltip.style.top = `${top}px`;
+            
+            // Update status
+            document.getElementById('status').innerHTML = `✅ Tooltip shown for citation ${citationId} from ${sourceDoc}`;
+        }
+        
+        function hideCitationTooltip() {
+            const tooltips = document.querySelectorAll('.citation-tooltip');
+            tooltips.forEach(tooltip => {
+                tooltip.style.animation = 'fadeOut 0.1s ease-in forwards';
+                setTimeout(() => tooltip.remove(), 100);
+            });
+            
+            // Update status
+            document.getElementById('status').innerHTML = 'Ready to test - hover over citations above';
+        }
+        
+        // Setup event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            const citationElements = document.querySelectorAll('.citation-sup');
+            console.log('Found citation elements:', citationElements.length);
+            
+            citationElements.forEach((element, index) => {
+                console.log(`Setting up tooltip for citation ${index + 1}:`, element);
+                element.addEventListener('mouseenter', showCitationTooltip);
+                element.addEventListener('mouseleave', hideCitationTooltip);
+            });
+        });
+    </script>
+</body>
+</html>

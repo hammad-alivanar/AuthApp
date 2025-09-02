@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Upload Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .upload-area { border: 2px dashed #ccc; padding: 20px; text-align: center; margin: 20px 0; }
+        .upload-area.dragover { border-color: #007bff; background-color: #f8f9fa; }
+        .progress { margin: 10px 0; }
+        .error { color: red; margin: 10px 0; }
+        .success { color: green; margin: 10px 0; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PDF Upload Test</h1>
+        
+        <div class="upload-area" id="uploadArea">
+            <p>Drop a PDF file here or click to select</p>
+            <input type="file" id="fileInput" accept=".pdf,application/pdf" style="display: none;">
+            <button onclick="document.getElementById('fileInput').click()">Select PDF File</button>
+        </div>
+        
+        <div id="progress" class="progress" style="display: none;"></div>
+        <div id="error" class="error" style="display: none;"></div>
+        <div id="success" class="success" style="display: none;"></div>
+        
+        <div id="result" style="margin-top: 20px;"></div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const progress = document.getElementById('progress');
+        const error = document.getElementById('error');
+        const success = document.getElementById('success');
+        const result = document.getElementById('result');
+
+        // Drag and drop functionality
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        async function handleFile(file) {
+            // Clear previous messages
+            error.style.display = 'none';
+            success.style.display = 'none';
+            result.innerHTML = '';
+            
+            // Validate file type
+            if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+                showError('Please select a PDF file.');
+                return;
+            }
+
+            // Validate file size (10MB max)
+            if (file.size > 10 * 1024 * 1024) {
+                showError('File size must be less than 10MB.');
+                return;
+            }
+
+            showProgress(`Processing ${file.name}...`);
+
+            try {
+                // Create FormData
+                const formData = new FormData();
+                formData.append('file', file);
+
+                // Upload to the ingest API
+                const response = await fetch('/api/ingest', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                
+                showSuccess(`✅ File processed successfully!`);
+                showResult(`
+                    <h3>Upload Results:</h3>
+                    <p><strong>File:</strong> ${file.name}</p>
+                    <p><strong>Document ID:</strong> ${result.documentId}</p>
+                    <p><strong>Chunks Created:</strong> ${result.chunksCount}</p>
+                    <p><strong>File Size:</strong> ${(file.size / 1024).toFixed(1)} KB</p>
+                `);
+
+            } catch (err) {
+                console.error('Upload error:', err);
+                showError(`Upload failed: ${err.message}`);
+            } finally {
+                hideProgress();
+            }
+        }
+
+        function showProgress(message) {
+            progress.textContent = message;
+            progress.style.display = 'block';
+        }
+
+        function hideProgress() {
+            progress.style.display = 'none';
+        }
+
+        function showError(message) {
+            error.textContent = message;
+            error.style.display = 'block';
+        }
+
+        function showSuccess(message) {
+            success.textContent = message;
+            success.style.display = 'block';
+        }
+
+        function showResult(html) {
+            result.innerHTML = html;
+        }
+    </script>
+</body>
+</html>

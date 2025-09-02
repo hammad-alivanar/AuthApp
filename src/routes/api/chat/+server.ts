@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
-import { chat } from '$lib/server/db/schema';
-import { eq } from 'drizzle-orm';
+import { chat, chunks, embeddings, documents } from '$lib/server/db/schema';
+import { eq, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 
 export const POST: RequestHandler = async ({ request, locals }) => {

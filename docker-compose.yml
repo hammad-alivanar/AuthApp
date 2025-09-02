@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres
+    image: pgvector/pgvector:pg17
     restart: always
     ports:
       - 5432:5432
@@ -10,5 +10,20 @@ services:
       POSTGRES_DB: local
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./drizzle/0004_enable_pgvector.sql:/docker-entrypoint-initdb.d/0004_enable_pgvector.sql
+      - ./drizzle/0005_create_rag_tables.sql:/docker-entrypoint-initdb.d/0005_create_rag_tables.sql
+
+  embed-api:
+    build:
+      context: ./embed-api
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - 8000:8000
+    environment:
+      - MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
+    depends_on:
+      - db
+
 volumes:
   pgdata:

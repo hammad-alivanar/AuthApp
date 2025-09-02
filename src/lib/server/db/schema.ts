@@ -62,3 +62,25 @@ export const message = pgTable('message', {
   content: text('content').notNull(),
   createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow()
 });
+
+// RAG Tables
+export const documents = pgTable('documents', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  source: text('source').notNull(),
+  mimeType: text('mime_type'),
+  createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow()
+});
+
+export const chunks = pgTable('chunks', {
+  id: text('id').primaryKey(),
+  documentId: text('document_id').notNull().references(() => documents.id, { onDelete: 'cascade' }),
+  idx: integer('idx').notNull(),
+  content: text('content').notNull(),
+  createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow()
+});
+
+export const embeddings = pgTable('embeddings', {
+  chunkId: text('chunk_id').primaryKey().references(() => chunks.id, { onDelete: 'cascade' }),
+  embedding: text('embedding') // Will be cast to vector(384) in SQL
+});
